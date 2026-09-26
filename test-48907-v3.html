@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Test MIMIT — Mizzana</title>
+<style>
+body{margin:0;background:#f4f6f8;font:14px Arial;color:#263238}.w{max-width:1050px;margin:28px auto;padding:0 16px}
+.c{background:#fff;border:1px solid #dfe4e8;border-radius:11px;padding:18px;margin-bottom:15px}
+h1,h2{color:#123f73}.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.b{border:1px solid #e1e5e8;border-radius:8px;padding:11px}.b small{display:block;color:#607080;font-weight:bold;margin-bottom:5px}
+button{background:#1565c0;color:white;border:0;border-radius:7px;padding:10px 16px;font-weight:bold}
+table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #e5e9ec;text-align:left}th{background:#f7f9fb}
+.pre{background:#eaf5ff;font-weight:bold}.post{background:#fff3df;font-weight:bold}pre{background:#101820;color:#e8edf2;padding:12px;white-space:pre-wrap}
+.ok{color:#16833d;font-weight:bold}.err{color:#b3261e;font-weight:bold}
+</style></head><body><div class="w">
+<div class="c"><h1>Test storico MIMIT — fornitore</h1><button onclick="run()">Esegui test</button> <span id="st"></span></div>
+<div class="c"><h2>Impianto identificato</h2><div class="g">
+<div class="b"><small>Fornitore / Gestore</small><span id="gestore">Ricerca…</span></div>
+<div class="b"><small>Bandiera</small><span id="bandiera">—</span></div>
+<div class="b"><small>Nome impianto</small><span id="nome">—</span></div>
+<div class="b"><small>Indirizzo</small><span id="indirizzo">—</span></div>
+</div></div>
+<div class="c"><h2>Rifornimento</h2><div class="g">
+<div class="b"><small>Data</small>15/09/2026 18:14:46</div><div class="b"><small>Carburante</small>Benzina</div>
+<div class="b"><small>Litri</small>18,79</div><div class="b"><small>ID MIMIT (diagnostica)</small>48907</div>
+</div></div>
+<div class="c" id="sum" style="display:none"><h2>Storico Benzina Self</h2><div class="g">
+<div class="b"><small>Ultimo prezzo ≤ rifornimento</small><span id="prev"></span></div>
+<div class="b"><small>Primo prezzo > rifornimento</small><span id="next"></span></div>
+</div><div style="overflow:auto"><table><thead><tr><th>Data</th><th>Prezzo €/L</th><th>Posizione</th></tr></thead><tbody id="tb"></tbody></table></div></div>
+<div class="c" id="dc" style="display:none"><h2>Diagnostica</h2><pre id="diag"></pre></div>
+</div>
+<script>
+const ID=48907,TARGET="2026-09-15T18:14:46",LAT=44.85222244262695,LON=11.587285995483398;
+const GRID=.05;
+async function json(url){let r=await fetch(url+"?v="+Date.now(),{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status+" "+url);return r.json()}
+async function gz(url){let r=await fetch(url+"?v="+Date.now(),{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status+" "+url);let b=await r.blob();let ds=new DecompressionStream("gzip");return JSON.parse(await new Response(b.stream().pipeThrough(ds)).text())}
+async function station(){
+ let cy=Math.floor(LAT/GRID),cx=Math.floor(LON/GRID),found=null;
+ for(let y=cy-1;y<=cy+1&&!found;y++)for(let x=cx-1;x<=cx+1&&!found;x++){
+  try{let a=await json(`data/geo/${y}_${x}.json`);found=a.find(v=>Number(v[0])===ID)||null}catch(e){}
+ }
+ return found;
+}
+function showStation(s){
+ if(!s){document.getElementById("gestore").textContent="Impianto non trovato nell'anagrafica attiva";return}
+ // [id,lat,lon,gestore,bandiera,tipo,nome,indirizzo,comune,provincia]
+ document.getElementById("gestore").textContent=s[3]||s[6]||"Non indicato";
+ document.getElementById("bandiera").textContent=s[4]||"—";
+ document.getElementById("nome").textContent=s[6]||"—";
+ document.getElementById("indirizzo").textContent=[s[7],s[8],s[9]].filter(Boolean).join(" — ")||"—";
+}
+async function run(){
+ let st=document.getElementById("st");st.textContent="Caricamento…";st.className="";
+ try{
+  let [s,o]=await Promise.all([station(),gz("data/prezzi/048/48907.json.gz")]);showStation(s);
+  let key=Object.keys(o.prezzi||{}).find(k=>k.toLowerCase()==="benzina|1");if(!key)throw Error("Benzina|1 non trovata");
+  let a=o.prezzi[key].map(r=>({date:String(r[0]),price:Number(r[1])})).sort((a,b)=>a.date.localeCompare(b.date));
+  let pre=a.filter(x=>x.date<=TARGET),post=a.filter(x=>x.date>TARGET),p=pre.at(-1)||null,n=post[0]||null;
+  document.getElementById("prev").innerHTML=p?`${p.date}<br><b>${p.price.toFixed(3)} €/L</b>`:"Nessuno";
+  document.getElementById("next").innerHTML=n?`${n.date}<br><b>${n.price.toFixed(3)} €/L</b>`:"Nessuno";
+  let tb=document.getElementById("tb");tb.innerHTML="";
+  a.forEach(x=>{let tr=document.createElement("tr"),pos=x.date<=TARGET?"Prima":"Dopo";if(p&&x.date===p.date){tr.className="pre";pos="ULTIMO ≤ RIFORNIMENTO"}if(n&&x.date===n.date){tr.className="post";pos="PRIMO > RIFORNIMENTO"}tr.innerHTML=`<td>${x.date}</td><td>${x.price.toFixed(3)}</td><td>${pos}</td>`;tb.appendChild(tr)});
+  document.getElementById("diag").textContent=JSON.stringify({idMIMIT:ID,coordinateFillUp:[LAT,LON],anagrafica:s,chiave:key,ultimoPrima:p,primoDopo:n,totale:a.length},null,2);
+  document.getElementById("sum").style.display=document.getElementById("dc").style.display="block";
+  st.textContent="✓ Test completato";st.className="ok";
+ }catch(e){st.textContent="✗ "+e.message;st.className="err";document.getElementById("dc").style.display="block";document.getElementById("diag").textContent=e.stack||e}
+}
+addEventListener("load",run);
+</script></body></html>
