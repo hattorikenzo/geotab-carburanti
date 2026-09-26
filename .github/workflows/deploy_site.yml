@@ -1,16 +1,22 @@
 name: Deploy sito GitHub Pages
+
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ["index.html","test-48907.html",".github/workflows/deploy_site.yml"]
+    paths:
+      - "*.html"
+      - ".github/workflows/deploy_site.yml"
+
 permissions:
   contents: read
   pages: write
   id-token: write
+
 concurrency:
   group: github-pages
   cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,36 +26,58 @@ jobs:
         with:
           ref: main
           path: main
-      - name: Checkout dataset
+
+      - name: Checkout dataset persistente
         uses: actions/checkout@v4
         with:
           ref: gh-pages
           path: dataset
+
       - name: Prepara sito
         shell: bash
         run: |
           set -euo pipefail
-          mkdir site
+          mkdir -p site
           cp -a dataset/data site/data
-          if [ -f main/index.html ]; then
-            cp main/index.html site/index.html
-          else
-            printf '%s\n' '<!doctype html><html lang="it"><head><meta charset="utf-8"><title>Geotab Carburanti</title></head><body><h1>Geotab Carburanti</h1><p>Dataset MIMIT online.</p><p><a href="test-48907.html">Test impianto 48907</a></p></body></html>' > site/index.html
+
+          # Pubblica automaticamente tutti gli HTML presenti nella root di main.
+          find main -maxdepth 1 -type f -name '*.html' -exec cp {} site/ \;
+
+          # Se non esiste ancora index.html, crea una pagina minima.
+          if [ ! -f site/index.html ]; then
+            cat > site/index.html <<'HTML'
+          <!doctype html>
+          <html lang="it">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>Geotab Carburanti</title>
+          </head>
+          <body>
+            <h1>Geotab Carburanti</h1>
+            <p>Dataset MIMIT online.</p>
+          </body>
+          </html>
+          HTML
           fi
-          cp main/test-48907.html site/test-48907.html
+
           touch site/.nojekyll
+
+          echo "Pagine HTML pubblicate:"
+          find site -maxdepth 1 -type f -name '*.html' -printf '%f\n' | sort
+
           test -f site/data/manifest.json
           test -f site/data/prezzi/048/48907.json.gz
-          test -f site/test-48907.html
-          du -sh site
-          echo "Prezzi: $(find site/data/prezzi -type f | wc -l)"
-          echo "Celle geo: $(find site/data/geo -type f | wc -l)"
+          test -f site/test-48907-v3.html
+
       - name: Configura Pages
         uses: actions/configure-pages@v5
+
       - name: Carica artifact
         uses: actions/upload-pages-artifact@v4
         with:
           path: site
+
   deploy:
     environment:
       name: github-pages
