@@ -1,0 +1,96 @@
+name: Importa archivi trimestrali MIMIT
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 9 * * *'
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: importa-archivi-mimit
+  cancel-in-progress: false
+jobs:
+  importa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+      - name: Importa trimestri mancanti con merge cronologico
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import csv,gzip,json,subprocess,tarfile,shutil
+          from pathlib import Path
+          from datetime import datetime,timezone
+          ROOT=Path('data'); PR=ROOT/'prezzi'; statep=ROOT/'archivi_importati.json'
+          state=json.loads(statep.read_text()) if statep.exists() else {'importati':[]}; done=set(state['importati']); now=datetime.now()
+          def head(url):return subprocess.run(['curl','-fsIL','--connect-timeout','20','--max-time','60',url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+          def setup(path):
+            lines=Path(path).read_text(encoding='utf-8-sig',errors='replace').splitlines()
+            for i,s in enumerate(lines[:30]):
+              if 'idimpianto' in s.lower():return i,('|' if s.count('|')>=s.count(';') else ';')
+            raise RuntimeError()
+          def rows(path):
+            n,sep=setup(path);f=open(path,encoding='utf-8-sig',errors='replace',newline='')
+            for _ in range(n):next(f,None)
+            yield from csv.DictReader(f,delimiter=sep)
+          def v(r,*names):
+            d={str(k).strip().lower():(x or '').strip() for k,x in r.items()};return next((d[n.lower()] for n in names if n.lower() in d),'')
+          def ndt(s):
+            for fmt in ('%d/%m/%Y %H:%M:%S','%d/%m/%Y %H:%M','%Y-%m-%d %H:%M:%S','%Y-%m-%dT%H:%M:%S'):
+              try:return datetime.strptime(s.strip(),fmt).strftime('%Y-%m-%dT%H:%M:%S')
+              except:pass
+            return s.strip()[:19].replace(' ','T')
+          def load(p):
+            if not p.exists():return {}
+            with gzip.open(p,'rt',encoding='utf-8') as f:return json.load(f)
+          def save(p,o):
+            p.parent.mkdir(parents=True,exist_ok=True);t=p.with_suffix('.json.gz.tmp')
+            with gzip.open(t,'wt',encoding='utf-8',compresslevel=9) as f:json.dump(o,f,ensure_ascii=False,separators=(',',':'))
+            t.replace(p)
+          candidates=[]
+          for y in range(2023,now.year+1):
+            for q in range(1,5):
+              tag=f'{y}-Q{q}'
+              if tag in done:continue
+              if y==now.year and q*3>=now.month:continue
+              url=f'https://opendatacarburanti.mise.gov.it/categorized/prezzo_alle_8/{y}/{y}_{q}_tr.tar.gz'
+              if head(url):candidates.append((y,q,tag,url))
+          print('Archivi nuovi:',[x[2] for x in candidates])
+          for y,q,tag,url in candidates:
+            w=Path(f'/tmp/{tag}');shutil.rmtree(w,ignore_errors=True);w.mkdir();tgz=w/'a.tar.gz'
+            subprocess.run(['curl','-fL','--retry','5','--retry-delay','10','--max-time','900',url,'-o',str(tgz)],check=True)
+            with tarfile.open(tgz,'r:gz') as t:t.extractall(w/'x',filter='data')
+            incoming={};count=0
+            for cp in (w/'x').rglob('*.csv'):
+              try:
+                for r in rows(cp):
+                  try:
+                    sid=int(v(r,'idImpianto'));fuel=v(r,'descCarburante');price=float(v(r,'prezzo').replace(',','.'));selfv=v(r,'isSelf');dt=ndt(v(r,'dtComu'))
+                    if fuel and dt:incoming.setdefault(sid,{}).setdefault(f'{fuel}|{selfv}',[]).append([dt,price]);count+=1
+                  except:pass
+              except:pass
+            added=files=0
+            for sid,groups in incoming.items():
+              p=PR/f'{sid//1000:03d}'/f'{sid}.json.gz';o=load(p) or {'id':sid,'prezzi':{}};changed=False
+              for key,recs in groups.items():
+                old=o.setdefault('prezzi',{}).get(key,[]);m={(str(x[0]),float(x[1])):[str(x[0]),float(x[1])] for x in old if len(x)>=2};before=len(m)
+                for dt,price in recs:m[(dt,float(price))]=[dt,float(price)]
+                arr=sorted(m.values(),key=lambda x:(x[0],x[1]));added+=max(0,len(arr)-before)
+                if arr!=old:o['prezzi'][key]=arr;changed=True
+              if changed:save(p,o);files+=1
+            done.add(tag);state={'importati':sorted(done),'ultimo_import':datetime.now(timezone.utc).isoformat()};statep.write_text(json.dumps(state,indent=2))
+            print(json.dumps({'archivio':tag,'righe_lette':count,'record_aggiunti':added,'file_modificati':files},indent=2))
+          PY
+      - name: Commit merge
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data
+          git diff --cached --quiet || (git commit -m 'Importa archivi trimestrali MIMIT' && git push origin gh-pages)
+      - name: Avvia deploy Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy_site.yml --repo "$GITHUB_REPOSITORY" --ref main
