@@ -254,4 +254,7 @@ jobs:
         if: steps.commit.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run deploy_site.yml --ref main
+        run: |
+          gh workflow run deploy_site.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main
