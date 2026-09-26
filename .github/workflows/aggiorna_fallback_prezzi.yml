@@ -1,10 +1,10 @@
-name: Aggiorna fallback prezzi correnti
+name: Aggiorna fallback prezzi Open Carburanti
 
 on:
   workflow_dispatch:
     inputs:
       station_ids:
-        description: "ID impianti MIMIT separati da virgola (vuoto = impianti già presenti nel fallback)"
+        description: "ID impianti MIMIT separati da virgola (facoltativo)"
         required: false
         default: ""
   schedule:
@@ -19,10 +19,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  fallback:
+  aggiorna:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout dataset
+      - name: Checkout dataset gh-pages
         uses: actions/checkout@v4
         with:
           ref: gh-pages
@@ -31,194 +32,313 @@ jobs:
       - name: Installa dipendenze
         run: python -m pip install --quiet requests beautifulsoup4
 
-      - name: Aggiorna fallback del trimestre non consolidato
+      - name: Aggiorna fallback Open Carburanti
         env:
-          INPUT_STATION_IDS: ${{ github.event.inputs.station_ids || '' }}
+          INPUT_STATION_IDS: ${{ inputs.station_ids || '' }}
         shell: bash
         run: |
           python - <<'PY'
-          import os, re, json, gzip, time
+          import os
+          import re
+          import json
+          import gzip
+          import time
           from pathlib import Path
           from datetime import datetime, timezone
+
           import requests
           from bs4 import BeautifulSoup
 
-          ROOT=Path("data")
-          FB=ROOT/"fallback"
-          FB.mkdir(parents=True,exist_ok=True)
+          ROOT = Path("data")
+          GEO = ROOT / "geo"
+          FALLBACK = ROOT / "fallback"
+          FALLBACK.mkdir(parents=True, exist_ok=True)
 
-          # Trimestri già ufficialmente importati dal MIMIT.
-          imported=set()
-          sp=ROOT/"archivi_importati.json"
-          if sp.exists():
+          now = datetime.now()
+          quarter = (now.month - 1) // 3 + 1
+          quarter_tag = f"{now.year}-Q{quarter}"
+          quarter_start_month = (quarter - 1) * 3 + 1
+          quarter_start = f"{now.year:04d}-{quarter_start_month:02d}-01"
+
+          # Se il trimestre corrente è già stato importato dagli archivi
+          # trimestrali MIMIT, il fallback non deve più essere utilizzato.
+          imported = set()
+          state = ROOT / "archivi_importati.json"
+          if state.exists():
               try:
-                  imported=set(json.loads(sp.read_text(encoding="utf-8")).get("importati",[]))
+                  obj = json.loads(state.read_text(encoding="utf-8"))
+                  if isinstance(obj, dict):
+                      imported.update(obj.get("importati", []))
+                      imported.update(obj.get("trimestri_importati", []))
+                  elif isinstance(obj, list):
+                      imported.update(obj)
+              except Exception as exc:
+                  print("Avviso lettura archivi_importati.json:", exc)
+
+          if quarter_tag in imported:
+              print(f"{quarter_tag} già consolidato con archivio MIMIT.")
+              print("Fallback non necessario.")
+              raise SystemExit(0)
+
+          # Legge provincia e dati degli impianti direttamente dal nostro
+          # indice geografico MIMIT già presente su gh-pages.
+          stations = {}
+          for path in GEO.glob("*.json"):
+              try:
+                  rows = json.loads(path.read_text(encoding="utf-8"))
+              except Exception:
+                  continue
+              if not isinstance(rows, list):
+                  continue
+              for row in rows:
+                  try:
+                      sid = int(row[0])
+                  except Exception:
+                      continue
+                  # Formato geo:
+                  # [id,lat,lon,gestore,bandiera,tipo,nome,indirizzo,comune,provincia]
+                  stations[sid] = {
+                      "provincia": str(row[9]).strip().lower() if len(row) > 9 and row[9] else "",
+                      "comune": str(row[8]).strip() if len(row) > 8 and row[8] else "",
+                      "nome": str(row[6]).strip() if len(row) > 6 and row[6] else "",
+                  }
+
+          ids = set()
+          raw = os.environ.get("INPUT_STATION_IDS", "")
+          for token in re.split(r"[\s,;]+", raw.strip()):
+              if token.isdigit():
+                  ids.add(int(token))
+
+          # Mantiene aggiornati gli impianti già presenti nel fallback.
+          for path in FALLBACK.glob("*/*.json.gz"):
+              try:
+                  ids.add(int(path.name[:-8]))
               except Exception:
                   pass
 
-          def quarter(dt):
-              return f"{dt.year}-Q{(dt.month-1)//3+1}"
-
-          current_q=quarter(datetime.now())
-          if current_q in imported:
-              print(f"{current_q} già consolidato MIMIT: fallback non necessario.")
-              raise SystemExit(0)
-
-          # ID richiesti manualmente + quelli che abbiamo già iniziato a seguire.
-          ids=set()
-          raw=os.environ.get("INPUT_STATION_IDS","")
-          for x in re.split(r"[\s,;]+",raw.strip()):
-              if x.isdigit(): ids.add(int(x))
-          for p in FB.glob("*/*.json.gz"):
-              try: ids.add(int(p.stem.split(".")[0]))
-              except: pass
-
+          # Solo per il primo collaudo: se GitHub non passa alcun ID e il
+          # fallback è ancora vuoto, prova automaticamente l'impianto 48907.
           if not ids:
-              print("Nessun impianto da aggiornare. Avvia manualmente indicando station_ids.")
-              raise SystemExit(0)
+              ids.add(48907)
+              print("Modalità collaudo: uso automaticamente l'impianto 48907.")
 
-          session=requests.Session()
-          session.headers.update({"User-Agent":"geotab-carburanti/1.0 (+GitHub Actions)"})
+          session = requests.Session()
+          session.headers.update({
+              "User-Agent": "Mozilla/5.0 (compatible; geotab-carburanti/1.0)",
+              "Accept-Language": "it-IT,it;q=0.9,en;q=0.5",
+          })
 
-          def loadgz(p):
-              if not p.exists(): return {"prezzi":{}}
-              with gzip.open(p,"rt",encoding="utf-8") as f:return json.load(f)
+          date_re = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\b")
+          price_re = re.compile(r"(?<!\d)([0-9]+[,.][0-9]{3})(?!\d)")
 
-          def savegz(p,obj):
-              p.parent.mkdir(parents=True,exist_ok=True)
-              tmp=p.with_suffix(p.suffix+".tmp")
-              with gzip.open(tmp,"wt",encoding="utf-8",compresslevel=9) as f:
-                  json.dump(obj,f,ensure_ascii=False,separators=(",",":"))
-              tmp.replace(p)
-
-          def parse_price(s):
-              m=re.search(r"(\d+[,.]\d{3})\s*€?/?L?",s,re.I)
-              return float(m.group(1).replace(",",".")) if m else None
-
-          def parse_date(s):
-              # Accetta dd/mm/yyyy, dd-mm-yyyy e date ISO visibili.
-              for pat in (r"(\d{1,2})/(\d{1,2})/(\d{4})",
-                          r"(\d{1,2})-(\d{1,2})-(\d{4})"):
-                  m=re.search(pat,s)
-                  if m:
-                      d,mo,y=map(int,m.groups())
-                      return f"{y:04d}-{mo:02d}-{d:02d}T00:00:00"
-              m=re.search(r"(20\d\d)-(\d\d)-(\d\d)",s)
-              return m.group(0)+"T00:00:00" if m else None
-
-          # Benzina24 usa l'ID MIMIT come suffisso dell'URL.
-          # Non conosciamo a priori lo slug; lo troviamo tramite la ricerca pubblica del sito.
-          def discover_url(sid):
-              q=f"https://www.google.com/search?q=site%3Abenzina24.it+%22-{sid}%2F%22"
-              try:
-                  r=session.get(q,timeout=30)
-                  for u in re.findall(r'https?://www\.benzina24\.it/[^"&<>\s]+',r.text):
-                      u=u.replace("&amp;","&")
-                      if re.search(rf"-{sid}/?$",u): return u
-              except Exception:
-                  pass
+          def normalize_fuel(value):
+              s = value.lower()
+              if "benzina" in s:
+                  return "Benzina"
+              if "gasolio" in s or "diesel" in s:
+                  return "Gasolio"
+              if "gpl" in s:
+                  return "GPL"
+              if "metano" in s:
+                  return "Metano"
               return None
 
-          def extract(sid,url):
-              r=session.get(url,timeout=45)
-              r.raise_for_status()
-              soup=BeautifulSoup(r.text,"html.parser")
-              text=soup.get_text(" ",strip=True)
+          def parse_date(match):
+              day, month, year = map(int, match.group(1, 2, 3))
+              hh = int(match.group(4) or 0)
+              mm = int(match.group(5) or 0)
+              ss = int(match.group(6) or 0)
+              return f"{year:04d}-{month:02d}-{day:02d}T{hh:02d}:{mm:02d}:{ss:02d}"
 
-              # Estrazione prudente: salviamo solo righe che contengono
-              # contemporaneamente data + carburante + prezzo.
-              records=[]
-              candidates=[]
-              for tag in soup.find_all(["tr","li","div","p"]):
-                  t=" ".join(tag.stripped_strings)
-                  if 15 <= len(t) <= 500: candidates.append(t)
+          def load_gzip(path):
+              if not path.exists():
+                  return {"prezzi": {}}
+              with gzip.open(path, "rt", encoding="utf-8") as fh:
+                  return json.load(fh)
 
-              seen=set()
-              for t in candidates:
-                  dt=parse_date(t)
-                  price=parse_price(t)
-                  if not dt or price is None: continue
-                  low=t.lower()
-                  fuel=None
-                  if "benzina" in low: fuel="Benzina"
-                  elif "gasolio" in low or "diesel" in low: fuel="Gasolio"
-                  elif "gpl" in low: fuel="GPL"
-                  elif "metano" in low: fuel="Metano"
-                  if not fuel: continue
-                  selfv="1" if "self" in low else "0"
-                  key=(fuel,selfv,dt,price)
-                  if key in seen: continue
-                  seen.add(key)
-                  records.append(key)
-              return records
+          def save_gzip(path, obj):
+              path.parent.mkdir(parents=True, exist_ok=True)
+              tmp = path.with_name(path.name + ".tmp")
+              with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=9) as fh:
+                  json.dump(obj, fh, ensure_ascii=False, separators=(",", ":"))
+              tmp.replace(path)
 
-          summary={"trimestre":current_q,"richiesti":len(ids),"aggiornati":0,
-                   "record_aggiunti":0,"non_trovati":[],"errori":[]}
+          def fetch_history(sid, province):
+              url = (
+                  "https://www.fabiodisconzi.com/open-carburanti/"
+                  f"provincia-{province}/{sid}/index.html"
+              )
+              response = session.get(url, timeout=45)
+              if response.status_code == 404:
+                  return url, []
+              response.raise_for_status()
 
-          for pos,sid in enumerate(sorted(ids),1):
-              print(f"[{pos}/{len(ids)}] Impianto {sid}")
+              soup = BeautifulSoup(response.text, "html.parser")
+              found = []
+              seen = set()
+
+              # Estrae righe tabellari mantenendo l'ultima data incontrata,
+              # perché alcune tabelle raggruppano più carburanti sotto la stessa data.
+              for table in soup.find_all("table"):
+                  last_dt = None
+                  for tr in table.find_all("tr"):
+                      cells = [" ".join(c.stripped_strings) for c in tr.find_all(["td", "th"])]
+                      if not cells:
+                          continue
+
+                      line = " | ".join(cells)
+                      dm = date_re.search(line)
+                      if dm:
+                          last_dt = parse_date(dm)
+                      if not last_dt:
+                          continue
+
+                      fuel = normalize_fuel(line)
+                      if not fuel:
+                          continue
+
+                      pm = price_re.search(line)
+                      if not pm:
+                          continue
+
+                      price = float(pm.group(1).replace(",", "."))
+                      low = line.lower()
+
+                      # Preferiamo/registriamo esplicitamente il tipo servizio.
+                      if "self" in low:
+                          service = "1"
+                      elif "servito" in low:
+                          service = "0"
+                      else:
+                          service = "1"
+
+                      record = (fuel, service, last_dt, price)
+                      if record not in seen:
+                          seen.add(record)
+                          found.append(record)
+
+              return url, found
+
+          summary = {
+              "trimestre": quarter_tag,
+              "richiesti": len(ids),
+              "aggiornati": 0,
+              "record_aggiunti": 0,
+              "non_trovati": [],
+              "senza_provincia": [],
+              "errori": [],
+          }
+
+          for index, sid in enumerate(sorted(ids), 1):
+              station = stations.get(sid, {})
+              province = station.get("provincia", "")
+              print(f"[{index}/{len(ids)}] Impianto {sid} provincia={province or '?'}")
+
+              if not province:
+                  summary["senza_provincia"].append(sid)
+                  continue
+
               try:
-                  url=discover_url(sid)
-                  if not url:
-                      summary["non_trovati"].append(sid); continue
-                  recs=extract(sid,url)
-                  if not recs:
-                      summary["non_trovati"].append(sid); continue
+                  url, records = fetch_history(sid, province)
 
-                  p=FB/f"{sid//1000:03d}"/f"{sid}.json.gz"
-                  obj=loadgz(p)
-                  obj["id"]=sid
-                  obj["fonte"]="Benzina24"
-                  obj["url"]=url
-                  obj["trimestre"]=current_q
-                  obj["aggiornato_il"]=datetime.now(timezone.utc).isoformat()
-                  before=sum(len(v) for v in obj.setdefault("prezzi",{}).values())
+                  # Conserva soltanto il trimestre corrente non ancora
+                  # consolidato dagli archivi trimestrali MIMIT.
+                  records = [
+                      r for r in records
+                      if r[2][:10] >= quarter_start
+                      and r[2][:4] == str(now.year)
+                      and ((int(r[2][5:7]) - 1) // 3 + 1) == quarter
+                  ]
 
-                  for fuel,selfv,dt,price in recs:
-                      # Il fallback serve solo al trimestre ancora non consolidato.
-                      try:
-                          d=datetime.fromisoformat(dt)
-                          if quarter(d)!=current_q: continue
-                      except: continue
-                      k=f"{fuel}|{selfv}"
-                      arr=obj["prezzi"].setdefault(k,[])
-                      if [dt,price] not in arr: arr.append([dt,price])
-                      arr.sort(key=lambda x:x[0])
+                  if not records:
+                      summary["non_trovati"].append(sid)
+                      print("  Nessun prezzo del trimestre corrente trovato.")
+                      continue
 
-                  after=sum(len(v) for v in obj["prezzi"].values())
-                  if after>before:
-                      savegz(p,obj)
-                      summary["aggiornati"]+=1
-                      summary["record_aggiunti"]+=after-before
-              except Exception as e:
-                  summary["errori"].append({"id":sid,"errore":str(e)})
-              time.sleep(1.0)
+                  path = FALLBACK / f"{sid // 1000:03d}" / f"{sid}.json.gz"
+                  obj = load_gzip(path)
+                  obj["id"] = sid
+                  obj["fonte"] = "Open Carburanti / Fabio Disconzi"
+                  obj["url"] = url
+                  obj["trimestre"] = quarter_tag
+                  obj["aggiornato_il"] = datetime.now(timezone.utc).isoformat()
+                  prices = obj.setdefault("prezzi", {})
 
-          (FB/"manifest.json").write_text(json.dumps({
-              "fonte":"Benzina24",
-              "trimestre":current_q,
-              "aggiornato_il":datetime.now(timezone.utc).isoformat(),
-              "nota":"Fallback provvisorio; MIMIT trimestrale ha sempre priorità."
-          },ensure_ascii=False,indent=2),encoding="utf-8")
+                  before = sum(len(v) for v in prices.values())
 
-          print(json.dumps(summary,ensure_ascii=False,indent=2))
+                  for fuel, service, dt, price in records:
+                      key = f"{fuel}|{service}"
+                      arr = prices.setdefault(key, [])
+                      pair = [dt, price]
+                      if pair not in arr:
+                          arr.append(pair)
+                      arr.sort(key=lambda x: (x[0], x[1]))
+
+                  after = sum(len(v) for v in prices.values())
+                  added = max(0, after - before)
+
+                  save_gzip(path, obj)
+                  summary["aggiornati"] += 1
+                  summary["record_aggiunti"] += added
+                  print(f"  OK: {len(records)} record letti, {added} nuovi.")
+
+              except Exception as exc:
+                  summary["errori"].append({"id": sid, "errore": str(exc)})
+                  print("  ERRORE:", exc)
+
+              time.sleep(1)
+
+          manifest = {
+              "fonte": "Open Carburanti / Fabio Disconzi",
+              "trimestre": quarter_tag,
+              "aggiornato_il": datetime.now(timezone.utc).isoformat(),
+              "mimit_prioritario": True,
+          }
+          (FALLBACK / "manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2),
+              encoding="utf-8",
+          )
+
+          print("\nRISULTATO")
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
           PY
 
-      - name: Commit fallback
+      - name: Verifica campione 48907
+        shell: bash
+        run: |
+          python - <<'PY'
+          import gzip
+          import json
+          from pathlib import Path
+
+          path = Path("data/fallback/048/48907.json.gz")
+          if not path.exists():
+              print("48907: nessun file fallback creato.")
+          else:
+              with gzip.open(path, "rt", encoding="utf-8") as fh:
+                  obj = json.load(fh)
+              print(json.dumps(obj, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Commit fallback su gh-pages
         shell: bash
         run: |
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/fallback
+
           if git diff --cached --quiet; then
-            echo "Nessuna modifica fallback."
+            echo "Nessuna modifica fallback da salvare."
           else
-            git commit -m "Aggiorna fallback prezzi trimestre corrente"
+            git commit -m "Aggiorna fallback Open Carburanti"
             git push origin gh-pages
           fi
 
       - name: Avvia deploy Pages
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run deploy_site.yml --repo "$GITHUB_REPOSITORY" --ref main
+        run: |
+          gh workflow run deploy_site.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main
