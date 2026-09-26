@@ -15,7 +15,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          URL="https://www.fuel-prices.eu/data/fp-d4-stations-it-2026-09.csv.gz"
+          URL="https://www.fuel-prices.eu/research/data/d4-stations/it/fp-d4-stations-it-2026-09.csv.gz"
           echo "Download: $URL"
           curl -fL --retry 4 --retry-delay 5 --connect-timeout 30 --max-time 300 \
             -A "Mozilla/5.0 (geotab-carburanti test)" \
