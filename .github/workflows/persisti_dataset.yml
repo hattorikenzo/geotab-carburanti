@@ -1,0 +1,72 @@
+name: Persisti dataset MIMIT
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Recupera script build dal workflow esistente
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path(".github/workflows/build_mimit.yml")
+          s=p.read_text(encoding="utf-8")
+          marker="cat > /tmp/build.py <<'PY'"
+          a=s.find(marker)
+          if a<0: raise SystemExit("Script build non trovato in build_mimit.yml")
+          a=s.find("\n",a)+1
+          b=s.find("\n          PY",a)
+          if b<0: raise SystemExit("Fine script build non trovata")
+          block=s[a:b]
+          lines=block.splitlines()
+          # Il blocco YAML run è indentato di 10 spazi.
+          block="\n".join(x[10:] if x.startswith("          ") else x for x in lines)
+          # Il vecchio script genera anche index diagnostico: non è un problema,
+          # perché salveremo solo /tmp/site/data.
+          Path("/tmp/build.py").write_text(block+"\n",encoding="utf-8")
+          print("Script estratto:",len(block),"caratteri")
+          PY
+
+      - name: Ricostruisci dataset MIMIT
+        run: python /tmp/build.py
+
+      - name: Prepara branch dati
+        shell: bash
+        run: |
+          rm -rf /tmp/datarepo
+          mkdir /tmp/datarepo
+          cp -a /tmp/site/data /tmp/datarepo/data
+          cd /tmp/datarepo
+          git init
+          git checkout -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          git commit -m "Dataset MIMIT persistente"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verifica
+        run: |
+          echo "Dataset salvato nella branch gh-pages"
+          du -sh /tmp/datarepo/data
+          find /tmp/datarepo/data/prezzi -type f | wc -l
+          find /tmp/datarepo/data/geo -type f | wc -l
