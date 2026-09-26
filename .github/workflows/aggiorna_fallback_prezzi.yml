@@ -74,10 +74,8 @@ jobs:
               except: pass
 
           if not ids:
-              # SOLO COLLAUDO: se non viene fornito alcun ID usa l'impianto campione 48907.
-              # Dopo la verifica questo fallback fisso verrà rimosso.
-              ids.add(48907)
-              print("Modalità collaudo: nessun station_ids ricevuto, uso automaticamente 48907.")
+              print("Nessun impianto da aggiornare. Avvia manualmente indicando station_ids.")
+              raise SystemExit(0)
 
           session=requests.Session()
           session.headers.update({"User-Agent":"geotab-carburanti/1.0 (+GitHub Actions)"})
