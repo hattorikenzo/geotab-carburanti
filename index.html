@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Costi Carburante</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f6f8;font:14px Arial,Helvetica,sans-serif;color:#263238}
+.wrap{max-width:1450px;margin:auto;padding:18px}h1{margin:0 0 16px;color:#123f73;font-size:25px}
+.card{background:#fff;border:1px solid #dfe4e8;border-radius:11px;padding:16px;margin-bottom:15px;box-shadow:0 1px 3px #0000000d}
+.controls{display:grid;grid-template-columns:minmax(280px,1fr) 170px auto;gap:12px;align-items:end}
+label{display:block;font-size:12px;font-weight:700;color:#607080;margin-bottom:6px;text-transform:uppercase}
+select,input{width:100%;height:40px;border:1px solid #cbd3d9;border-radius:7px;padding:0 10px;background:#fff}
+button{height:40px;border:0;border-radius:7px;background:#1565c0;color:#fff;padding:0 18px;font-weight:700;cursor:pointer}
+button:disabled{opacity:.55;cursor:not-allowed}.status{margin-top:12px;color:#607080}.ok{color:#16833d}.err{color:#b3261e}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.stat{background:#f8fafb;border:1px solid #e3e8eb;border-radius:9px;padding:14px}
+.stat small{display:block;color:#607080;font-weight:700;text-transform:uppercase}.stat strong{display:block;font-size:23px;color:#123f73;margin-top:5px}
+.tablewrap{overflow:auto;max-height:650px}table{width:100%;border-collapse:collapse;min-width:980px}th{position:sticky;top:0;background:#eef3f7;color:#425563;text-align:left;font-size:12px;text-transform:uppercase;z-index:1}
+th,td{padding:10px;border-bottom:1px solid #e4e8eb;vertical-align:top}td.num{text-align:right;white-space:nowrap}
+.muted{color:#7a8790}.warn{color:#a05a00;font-weight:700}.supplier{font-weight:700}.sub{font-size:12px;color:#6b7880;margin-top:3px}
+details{margin-top:12px}pre{background:#101820;color:#e8edf2;padding:12px;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:800px){.controls{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.wrap{padding:10px}}
+</style>
+</head>
+<body><div class="wrap">
+<h1>Costi Carburante</h1>
+
+<div class="card">
+  <div class="controls">
+    <div><label for="vehicle">Veicolo</label><select id="vehicle"><option>Caricamento veicoli…</option></select></div>
+    <div><label for="days">Periodo (giorni)</label><input id="days" type="number" min="1" max="1095" value="30"></div>
+    <button id="load" disabled>Carica storico</button>
+  </div>
+  <div id="status" class="status">Connessione a MyGeotab…</div>
+</div>
+
+<div class="card">
+<div class="stats">
+ <div class="stat"><small>Rifornimenti</small><strong id="n">0</strong></div>
+ <div class="stat"><small>Litri</small><strong id="liters">0,00 L</strong></div>
+ <div class="stat"><small>Costo totale verificato</small><strong id="total">€ 0,00</strong></div>
+ <div class="stat"><small>Prezzo medio verificato</small><strong id="avg">—</strong></div>
+</div>
+</div>
+
+<div class="card">
+<div class="tablewrap"><table>
+<thead><tr><th>Data rifornimento</th><th>Distributore rilevato</th><th>Carburante</th><th>Prezzo €/L</th><th>Litri</th><th>Costo totale</th></tr></thead>
+<tbody id="rows"><tr><td colspan="6" class="muted">Seleziona un veicolo e il periodo.</td></tr></tbody>
+</table></div>
+<details><summary>Diagnostica</summary><pre id="diag">—</pre></details>
+</div>
+</div>
+
+<script>
+(function(){
+"use strict";
+const DATA_BASE="https://hattorikenzo.github.io/geotab-carburanti/data";
+const GRID=.05, MAX_STATION_METERS=500;
+/* Finché il Q3 2026 non è completo, non consideriamo verificato un prezzo troppo vecchio.
+   Quando gli archivi trimestrali sono completi, questa protezione evita costi inventati. */
+const MAX_PRICE_AGE_DAYS=14;
+
+let api=null, vehicles=[], debug=[];
+
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const money=n=>new Intl.NumberFormat("it-IT",{style:"currency",currency:"EUR"}).format(n);
+const dec=(n,d=2)=>new Intl.NumberFormat("it-IT",{minimumFractionDigits:d,maximumFractionDigits:d}).format(n);
+
+function call(method,params){
+ return new Promise((resolve,reject)=>{
+  try{api.call(method,params||{},resolve,e=>reject(new Error(typeof e==="string"?e:JSON.stringify(e))))}
+  catch(e){reject(e)}
+ });
+}
+function get(type,search,resultsLimit){
+ return call("Get",{typeName:type,search:search||{},resultsLimit:resultsLimit||50000});
+}
+function dtLocal(v){let d=new Date(v);return isNaN(d)?String(v):d.toLocaleString("it-IT")}
+function isoNoZone(v){let d=new Date(v);if(isNaN(d))return String(v).slice(0,19);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,19)}
+function hav(lat1,lon1,lat2,lon2){
+ const R=6371000,p=Math.PI/180,a=Math.sin((lat2-lat1)*p/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin((lon2-lon1)*p/2)**2;
+ return 2*R*Math.asin(Math.sqrt(a));
+}
+function normalizeFuel(v){
+ let s=String(v||"").toLowerCase();
+ if(/diesel|gasolio/.test(s))return "Gasolio";
+ if(/gasoline|petrol|benzina/.test(s))return "Benzina";
+ if(/lpg|gpl/.test(s))return "GPL";
+ if(/cng|metano/.test(s))return "Metano";
+ return "";
+}
+function fillCoords(f){
+ let lat=f.latitude,lon=f.longitude;
+ if(f.location){ if(lat==null)lat=f.location.y; if(lon==null)lon=f.location.x; }
+ lat=Number(lat);lon=Number(lon);
+ return Number.isFinite(lat)&&Number.isFinite(lon)?[lat,lon]:null;
+}
+function litersOf(f){
+ for(const k of ["volume","liters","fuelVolume","totalFuel"]){let n=Number(f[k]);if(Number.isFinite(n)&&n>0)return n}
+ return 0;
+}
+async function fetchJson(url){
+ let r=await fetch(url,{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status+" "+url);return r.json();
+}
+async function fetchGzip(url){
+ let r=await fetch(url,{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status+" "+url);
+ if(!("DecompressionStream" in window))throw new Error("Browser senza supporto gzip DecompressionStream");
+ let b=await r.blob(),ds=new DecompressionStream("gzip");
+ return JSON.parse(await new Response(b.stream().pipeThrough(ds)).text());
+}
+async function nearestStation(lat,lon){
+ let cy=Math.floor(lat/GRID),cx=Math.floor(lon/GRID),all=[];
+ await Promise.all(Array.from({length:9},(_,i)=>{
+  let dy=Math.floor(i/3)-1,dx=i%3-1;
+  return fetchJson(`${DATA_BASE}/geo/${cy+dy}_${cx+dx}.json`).then(a=>all.push(...a)).catch(()=>{});
+ }));
+ let best=null;
+ for(const s of all){
+  let d=hav(lat,lon,Number(s[1]),Number(s[2]));
+  if(!best||d<best.distance)best={raw:s,distance:d};
+ }
+ return best&&best.distance<=MAX_STATION_METERS?best:null;
+}
+async function historicalPrice(stationId,fuel,fillDate){
+ let p=`${DATA_BASE}/prezzi/${String(Math.floor(stationId/1000)).padStart(3,"0")}/${stationId}.json.gz`;
+ let o=await fetchGzip(p),keys=Object.keys(o.prezzi||{});
+ let candidates=[];
+ for(const key of keys){
+  let [name,self]=key.split("|");
+  if(normalizeFuel(name)!==fuel)continue;
+  for(const r of o.prezzi[key]||[]) if(String(r[0])<=fillDate)candidates.push({date:String(r[0]),price:Number(r[1]),self});
+ }
+ candidates.sort((a,b)=>b.date.localeCompare(a.date));
+ if(!candidates.length)return null;
+ /* preferisce Self a parità/stretta vicinanza temporale */
+ let latest=candidates[0], self=candidates.find(x=>x.self==="1"&&x.date===latest.date);
+ return self||latest;
+}
+function supplier(s){
+ let r=s.raw,gestore=r[3]||"",bandiera=r[4]||"",nome=r[6]||"";
+ return {gestore,bandiera,nome,address:[r[7],r[8],r[9]].filter(Boolean).join(" — ")};
+}
+async function fuelForVehicle(v){
+ let f=normalizeFuel(v.fuelType||v.propulsionType||v.powertrainType);
+ if(f)return f;
+ let groups=(v.groups||[]).map(g=>String(g.id||g.name||"")).join(" ");
+ return normalizeFuel(groups);
+}
+async function processFill(f,vehicleFuel){
+ let coords=fillCoords(f), liters=litersOf(f), date=f.dateTime||f.date||f.timestamp, dateKey=isoNoZone(date);
+ let fuel=normalizeFuel(f.productType)||vehicleFuel;
+ let out={date,liters,fuel,coords};
+ if(!coords){out.error="Coordinate non disponibili";return out}
+ let ns=await nearestStation(coords[0],coords[1]);
+ if(!ns){out.error="Impianto MIMIT non identificato entro "+MAX_STATION_METERS+" m";return out}
+ out.station=ns;out.supplier=supplier(ns);
+ if(!fuel){out.error="Tipo carburante non riconosciuto";return out}
+ let hp=await historicalPrice(Number(ns.raw[0]),fuel,dateKey);
+ if(!hp){out.error="Prezzo storico non disponibile";return out}
+ out.price=hp;
+ let age=(new Date(dateKey)-new Date(hp.date))/86400000;
+ out.priceAgeDays=age;
+ if(age>MAX_PRICE_AGE_DAYS){out.error="Storico MIMIT incompleto: ultimo prezzo troppo precedente";return out}
+ out.cost=liters*hp.price;out.verified=true;
+ return out;
+}
+function render(items){
+ let tb=$("rows");tb.innerHTML="";
+ let tl=0,tc=0,vl=0,valid=0;
+ for(const x of items){
+  tl+=x.liters||0;
+  if(x.verified){tc+=x.cost;vl+=x.liters;valid++}
+  let sup=x.supplier?`<div class="supplier">${esc(x.supplier.gestore||x.supplier.nome||"Impianto MIMIT")}</div>
+    <div class="sub">${esc([x.supplier.bandiera,x.supplier.nome].filter(Boolean).join(" — "))}</div>
+    <div class="sub">${esc(x.supplier.address)}${x.station?` · ${dec(x.station.distance,1)} m`:""}</div>`:
+    `<span class="warn">${esc(x.error||"Non identificato")}</span>`;
+  let price=x.verified?`${dec(x.price.price,3)}<div class="sub">${esc(dtLocal(x.price.date))}</div>`:
+    `<span class="warn">${x.price?dec(x.price.price,3)+" (non verificato)":"—"}</span>`;
+  let cost=x.verified?money(x.cost):"—";
+  let tr=document.createElement("tr");
+  tr.innerHTML=`<td>${esc(dtLocal(x.date))}</td><td>${sup}</td><td>${esc(x.fuel||"—")}</td>
+  <td class="num">${price}</td><td class="num">${dec(x.liters||0,2)} L</td><td class="num"><b>${cost}</b></td>`;
+  tb.appendChild(tr);
+ }
+ if(!items.length)tb.innerHTML='<tr><td colspan="6" class="muted">Nessun rifornimento nel periodo selezionato.</td></tr>';
+ $("n").textContent=items.length;$("liters").textContent=dec(tl,2)+" L";$("total").textContent=money(tc);
+ $("avg").textContent=vl>0?dec(tc/vl,3)+" €/L":"—";
+ $("diag").textContent=JSON.stringify(debug,null,2);
+}
+async function loadHistory(){
+ let vid=$("vehicle").value,days=Math.max(1,Math.min(1095,Number($("days").value)||30));
+ if(!vid)return;
+ $("load").disabled=true;$("status").className="status";$("status").textContent="Caricamento rifornimenti…";debug=[];
+ try{
+  let to=new Date(),from=new Date(to.getTime()-days*86400000);
+  let fills=await get("FillUp",{deviceSearch:{id:vid},fromDate:from.toISOString(),toDate:to.toISOString()},50000);
+  fills=(fills||[]).sort((a,b)=>new Date(b.dateTime||b.date)-new Date(a.dateTime||a.date));
+  let v=vehicles.find(x=>x.id===vid)||{},vf=await fuelForVehicle(v),out=[];
+  for(let i=0;i<fills.length;i++){
+   $("status").textContent=`Analisi rifornimento ${i+1} di ${fills.length}…`;
+   try{let x=await processFill(fills[i],vf);out.push(x);debug.push(x)}
+   catch(e){let x={date:fills[i].dateTime||fills[i].date,liters:litersOf(fills[i]),error:e.message};out.push(x);debug.push(x)}
+  }
+  render(out);$("status").className="status ok";$("status").textContent=`Completato: ${fills.length} rifornimenti analizzati.`;
+ }catch(e){$("status").className="status err";$("status").textContent="Errore: "+e.message;$("diag").textContent=e.stack||String(e)}
+ finally{$("load").disabled=false}
+}
+async function init(myApi){
+ api=myApi;$("status").textContent="MyGeotab collegato. Caricamento veicoli…";
+ try{
+  vehicles=await get("Device",{},50000);
+  vehicles=(vehicles||[]).filter(v=>!v.isArchived).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+  $("vehicle").innerHTML='<option value="">Seleziona un veicolo…</option>'+vehicles.map(v=>`<option value="${esc(v.id)}">${esc(v.name||v.id)}</option>`).join("");
+  $("load").disabled=false;$("status").className="status ok";$("status").textContent=`MyGeotab collegato. ${vehicles.length} veicoli disponibili.`;
+ }catch(e){$("status").className="status err";$("status").textContent="Errore MyGeotab: "+e.message}
+}
+$("load").addEventListener("click",loadHistory);
+
+/* Entry point standard add-in MyGeotab */
+window.geotab=window.geotab||{};
+window.geotab.addin=window.geotab.addin||{};
+window.geotab.addin.costiCarburante=function(){
+ return {
+  initialize:function(api,state,callback){init(api).finally(()=>callback&&callback())},
+  focus:function(api,state){if(!window.__fuelApi){window.__fuelApi=true;api&&init(api)}},
+  blur:function(){}
+ };
+};
+})();
+</script></body></html>
