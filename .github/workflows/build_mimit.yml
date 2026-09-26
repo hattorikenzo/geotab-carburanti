@@ -1,0 +1,278 @@
+name: Build MIMIT e deploy GitHub Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Costruisci dataset
+        shell: bash
+        run: |
+          cat > /tmp/build.py <<'PY'
+          import csv, gzip, io, json, math, shutil, tarfile, urllib.request
+          from collections import defaultdict
+          from datetime import datetime
+          from pathlib import Path
+
+          SITE=Path("/tmp/site")
+          RAW=Path("/tmp/raw")
+          SITE.mkdir()
+          RAW.mkdir()
+          (SITE/"data"/"prezzi").mkdir(parents=True)
+          (SITE/"data"/"geo").mkdir(parents=True)
+
+          # Archivio storico prezzi ufficiale MIMIT: 2023 -> 2026 Q2.
+          archives=[
+              (y,q,f"https://opendatacarburanti.mise.gov.it/categorized/prezzo_alle_8/{y}/{y}_{q}_tr.tar.gz")
+              for y in range(2023,2027) for q in range(1,5)
+              if not (y==2026 and q>2)
+          ]
+
+          CURRENT_STATIONS="https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv"
+
+          def clean(x):
+              return (x or "").strip().lstrip("\ufeff")
+
+          def decode(data):
+              try: return data.decode("utf-8-sig")
+              except UnicodeDecodeError: return data.decode("latin-1")
+
+          def csv_reader(data):
+              text=decode(data)
+              lines=text.splitlines()
+              sample="\n".join(lines[:12])
+              delim="|" if sample.count("|") > sample.count(";") else ";"
+              h=next((i for i,l in enumerate(lines[:30])
+                      if "idimpianto" in l.lower()),None)
+              if h is None:
+                  raise ValueError("Header idImpianto non trovato")
+              return csv.DictReader(io.StringIO("\n".join(lines[h:])),delimiter=delim)
+
+          def pself(x):
+              return 1 if clean(x).lower() in ("1","true","t","yes","si","sì") else 0
+
+          def pdate(x):
+              x=clean(x)
+              for f in ("%d/%m/%Y %H:%M:%S","%d/%m/%Y %H:%M",
+                        "%Y-%m-%d %H:%M:%S","%Y-%m-%d %H:%M",
+                        "%Y-%m-%dT%H:%M:%S"):
+                  try: return datetime.strptime(x,f)
+                  except ValueError: pass
+              return datetime.fromisoformat(x.replace("Z","+00:00")).replace(tzinfo=None)
+
+          # ---------------- STORICO PREZZI ----------------
+          last={}
+          stations_prices=defaultdict(lambda: defaultdict(list))
+          rows=valid=bad=changes=csv_count=0
+
+          def process_price_csv(data,label):
+              nonlocal_dummy=None
+              global rows,valid,bad,changes,csv_count
+              r=csv_reader(data)
+              fm={clean(x).lower():x for x in (r.fieldnames or []) if x}
+              def get(row,n): return row.get(fm.get(n.lower(),""),"")
+              lr=lc=lb=0
+              for row in r:
+                  rows+=1; lr+=1
+                  try:
+                      sid=int(clean(get(row,"idImpianto")))
+                      fuel=clean(get(row,"descCarburante"))
+                      price=float(clean(get(row,"prezzo")).replace(",","."))
+                      sv=pself(get(row,"isSelf"))
+                      dt=pdate(get(row,"dtComu"))
+                      if sid<=0 or not fuel or price<=0: raise ValueError()
+                      valid+=1
+                      key=(sid,fuel,sv)
+                      if key not in last or abs(last[key]-price)>1e-9:
+                          last[key]=price
+                          stations_prices[sid][f"{fuel}|{sv}"].append(
+                              [dt.strftime("%Y-%m-%dT%H:%M:%S"),price]
+                          )
+                          changes+=1; lc+=1
+                  except Exception:
+                      bad+=1; lb+=1
+              csv_count+=1
+              print(f"{label}: righe={lr:,} cambi={lc:,} scarti={lb:,}")
+
+          for y,q,url in archives:
+              print(f"\n=== PREZZI {y} Q{q} ===")
+              arc=RAW/f"{y}_{q}.tar.gz"
+              req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0"})
+              with urllib.request.urlopen(req,timeout=180) as r, open(arc,"wb") as f:
+                  shutil.copyfileobj(r,f)
+              with tarfile.open(arc,"r:gz") as t:
+                  members=sorted(
+                      [m for m in t.getmembers() if m.isfile() and m.name.lower().endswith(".csv")],
+                      key=lambda m:m.name
+                  )
+                  for m in members:
+                      f=t.extractfile(m)
+                      if f: process_price_csv(f.read(),Path(m.name).name)
+              arc.unlink()
+              print(f"Progressivo: {rows:,} righe, {changes:,} cambi, {len(stations_prices):,} impianti")
+
+          # Un file gzip per impianto. Il browser lo decomprimerà con DecompressionStream.
+          gz_total=0
+          for sid in sorted(stations_prices):
+              raw=json.dumps(
+                  {"id":sid,"prezzi":stations_prices[sid]},
+                  ensure_ascii=False,separators=(",",":")
+              ).encode("utf-8")
+              bucket=f"{sid//1000:03d}"
+              d=SITE/"data"/"prezzi"/bucket
+              d.mkdir(parents=True,exist_ok=True)
+              p=d/f"{sid}.json.gz"
+              with gzip.open(p,"wb",compresslevel=9) as z:
+                  z.write(raw)
+              gz_total+=p.stat().st_size
+
+          # ---------------- ANAGRAFICA CORRENTE ----------------
+          print("\n=== ANAGRAFICA IMPIANTI CORRENTE ===")
+          req=urllib.request.Request(CURRENT_STATIONS,headers={"User-Agent":"Mozilla/5.0"})
+          with urllib.request.urlopen(req,timeout=180) as r:
+              station_data=r.read()
+
+          reader=csv_reader(station_data)
+          fm={clean(x).lower():x for x in (reader.fieldnames or []) if x}
+          def gv(row,*names):
+              for n in names:
+                  k=fm.get(n.lower())
+                  if k and clean(row.get(k,"")):
+                      return clean(row.get(k,""))
+              return ""
+
+          # Celle da 0.05° (~4-5 km in Italia): l'addin caricherà solo le celle vicine.
+          cells=defaultdict(list)
+          station_count=station_bad=0
+          for row in reader:
+              try:
+                  sid=int(gv(row,"idImpianto"))
+                  lat=float(gv(row,"Latitudine").replace(",","."))
+                  lon=float(gv(row,"Longitudine").replace(",","."))
+                  if not (35<=lat<=48 and 6<=lon<=19): raise ValueError()
+                  item=[
+                      sid,
+                      round(lat,6),
+                      round(lon,6),
+                      gv(row,"Gestore"),
+                      gv(row,"Bandiera"),
+                      gv(row,"Tipo Impianto","TipoImpianto"),
+                      gv(row,"Nome Impianto","NomeImpianto"),
+                      gv(row,"Indirizzo"),
+                      gv(row,"Comune"),
+                      gv(row,"Provincia")
+                  ]
+                  cy=math.floor(lat/0.05)
+                  cx=math.floor(lon/0.05)
+                  cells[(cy,cx)].append(item)
+                  station_count+=1
+              except Exception:
+                  station_bad+=1
+
+          for (cy,cx),items in cells.items():
+              # JSON normale: piccolo e direttamente fetchabile dal browser.
+              p=SITE/"data"/"geo"/f"{cy}_{cx}.json"
+              p.write_text(json.dumps(items,ensure_ascii=False,separators=(",",":")),encoding="utf-8")
+
+          manifest={
+              "version":datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "storico_da":"2023-01-01",
+              "storico_archivi_fino_a":"2026-Q2",
+              "grid_degrees":0.05,
+              "price_path":"data/prezzi/{bucket}/{id}.json.gz",
+              "geo_path":"data/geo/{lat_cell}_{lon_cell}.json",
+              "price_format":"gzip-json",
+              "price_keys":"Carburante|isSelf",
+              "station_fields":["id","lat","lon","gestore","bandiera","tipo","nome","indirizzo","comune","provincia"]
+          }
+          (SITE/"data"/"manifest.json").write_text(
+              json.dumps(manifest,ensure_ascii=False,separators=(",",":")),
+              encoding="utf-8"
+          )
+
+          # Pagina diagnostica temporanea. In seguito sarà sostituita dall'index MyGeotab.
+          html=f"""<!doctype html>
+          <html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+          <title>Geotab Carburanti</title>
+          <style>body{{font-family:Arial;max-width:900px;margin:40px auto;padding:20px}}
+          code{{background:#eee;padding:2px 5px}}</style></head>
+          <body><h1>Geotab Carburanti</h1>
+          <p>Dataset MIMIT generato correttamente.</p>
+          <ul>
+          <li>Righe storiche elaborate: <b>{rows:,}</b></li>
+          <li>Cambi prezzo conservati: <b>{changes:,}</b></li>
+          <li>Impianti con storico: <b>{len(stations_prices):,}</b></li>
+          <li>Impianti attivi indicizzati: <b>{station_count:,}</b></li>
+          <li>Dimensione storico gzip: <b>{gz_total/1048576:.2f} MB</b></li>
+          </ul>
+          <p>Manifest: <code>data/manifest.json</code></p>
+          </body></html>"""
+          (SITE/"index.html").write_text(html,encoding="utf-8")
+          (SITE/".nojekyll").write_text("")
+
+          summary={
+              "righe":rows,"valide":valid,"scartate":bad,"cambi":changes,
+              "impianti_storico":len(stations_prices),
+              "impianti_attivi":station_count,"impianti_scartati":station_bad,
+              "celle_geo":len(cells),"gzip_bytes":gz_total
+          }
+          Path("/tmp/summary.json").write_text(json.dumps(summary),encoding="utf-8")
+          print("\n========== BUILD COMPLETATA ==========")
+          print(json.dumps(summary,indent=2))
+          PY
+          python /tmp/build.py
+
+      - name: Riepilogo
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          s=json.load(open("/tmp/summary.json"))
+          print("# Dataset MIMIT pronto")
+          print("| Voce | Valore |"); print("|---|---:|")
+          print(f"| Righe elaborate | {s['righe']:,} |")
+          print(f"| Cambi conservati | {s['cambi']:,} |")
+          print(f"| Impianti con storico | {s['impianti_storico']:,} |")
+          print(f"| Impianti attivi | {s['impianti_attivi']:,} |")
+          print(f"| Celle geografiche | {s['celle_geo']:,} |")
+          print(f"| Storico gzip | {s['gzip_bytes']/1048576:.2f} MB |")
+          PY
+
+      - name: Configura Pages
+        uses: actions/configure-pages@v5
+
+      - name: Carica artifact Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: /tmp/site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Pubblica GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
