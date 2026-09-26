@@ -1,0 +1,16 @@
+{
+  "fonte": "fuel-prices.eu / Osservaprezzi Carburanti MIMIT",
+  "licenza_sorgente_italia": "Italian Open Data License 2.0",
+  "trimestre": "2026-Q3",
+  "mesi_disponibili": [
+    "2026-07",
+    "2026-08",
+    "2026-09"
+  ],
+  "tipo": "snapshot_giornaliero",
+  "priorita": "fallback; MIMIT trimestrale ufficiale prevale",
+  "impianti": 21610,
+  "punti_importati": 3697965,
+  "file_modificati": 21610,
+  "aggiornato_il": "2026-09-26T23:48:48.034208+00:00"
+}
