@@ -1,0 +1,257 @@
+name: Backfill trimestre corrente Fuel Prices EU
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Anno da importare (vuoto = anno corrente)"
+        required: false
+        default: ""
+      quarter:
+        description: "Trimestre 1-4 (vuoto = trimestre corrente)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: backfill-fuel-prices-eu
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout dataset gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+
+      - name: Scarica e converte il trimestre
+        env:
+          INPUT_YEAR: ${{ inputs.year || '' }}
+          INPUT_QUARTER: ${{ inputs.quarter || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, csv, gzip, json, urllib.request, urllib.error
+          from pathlib import Path
+          from datetime import datetime, timezone
+          from collections import defaultdict
+
+          ROOT = Path("data")
+          OUT = ROOT / "fallback_mensile"
+          OUT.mkdir(parents=True, exist_ok=True)
+
+          now = datetime.now()
+          year = int(os.environ.get("INPUT_YEAR") or now.year)
+          quarter = int(os.environ.get("INPUT_QUARTER") or ((now.month - 1)//3 + 1))
+          if quarter not in (1,2,3,4):
+              raise SystemExit("quarter deve essere 1, 2, 3 o 4")
+
+          qtag = f"{year}-Q{quarter}"
+          months = list(range((quarter-1)*3+1, (quarter-1)*3+4))
+          print("Trimestre:", qtag, "mesi:", months)
+
+          # Se il trimestre è già consolidato dagli archivi MIMIT, non serve fallback.
+          imported=set()
+          state=ROOT/"archivi_importati.json"
+          if state.exists():
+              try:
+                  o=json.loads(state.read_text(encoding="utf-8"))
+                  if isinstance(o,dict):
+                      imported.update(o.get("importati",[]))
+                      imported.update(o.get("trimestri_importati",[]))
+                  elif isinstance(o,list):
+                      imported.update(o)
+              except Exception as e:
+                  print("Avviso stato archivi:",e)
+          if qtag in imported:
+              print(qtag,"già consolidato MIMIT: nessun backfill necessario.")
+              raise SystemExit(0)
+
+          # fuel-prices.eu: dataset station-level giornaliero italiano,
+          # sorgente dichiarata Osservaprezzi Carburanti (MIMIT).
+          BASE="https://www.fuel-prices.eu/research/data/d4-stations/it"
+          tmp=Path("/tmp/fuel-prices-eu")
+          tmp.mkdir(exist_ok=True)
+
+          files=[]
+          for month in months:
+              name=f"fp-d4-stations-it-{year}-{month:02d}.csv.gz"
+              url=f"{BASE}/{name}"
+              dest=tmp/name
+              print("\nDownload:",url)
+              req=urllib.request.Request(
+                  url,
+                  headers={"User-Agent":"Mozilla/5.0 (geotab-carburanti backfill/1.0)"}
+              )
+              try:
+                  with urllib.request.urlopen(req,timeout=120) as r, open(dest,"wb") as f:
+                      while True:
+                          b=r.read(1024*1024)
+                          if not b: break
+                          f.write(b)
+              except urllib.error.HTTPError as e:
+                  if e.code==404:
+                      print("File non ancora disponibile:",name)
+                      continue
+                  raise
+              print("Scaricato:",dest.stat().st_size,"byte")
+              files.append(dest)
+
+          if not files:
+              raise SystemExit("Nessun dataset mensile disponibile.")
+
+          # Salviamo snapshot giornalieri separati dallo storico MIMIT ufficiale:
+          # data/fallback_mensile/{bucket}/{id}.json.gz
+          # {"id":48907,"fonte":"...","trimestre":"2026-Q3",
+          #  "giornalieri":{"Benzina":[["2026-09-02",1.998],...],...}}
+          station_data=defaultdict(lambda: defaultdict(dict))
+          rows=valid=0
+
+          fuel_map={
+              "sp95":"Benzina",
+              "petrol95":"Benzina",
+              "euro95":"Benzina",
+              "gasoline":"Benzina",
+              "petrol":"Benzina",
+              "diesel":"Gasolio",
+          }
+
+          for path in files:
+              print("\nLettura:",path.name)
+              with gzip.open(path,"rt",encoding="utf-8-sig",errors="replace",newline="") as f:
+                  reader=csv.DictReader(f)
+                  required={"date","station_id","fuel","price"}
+                  if not required.issubset(set(reader.fieldnames or [])):
+                      raise RuntimeError(f"Schema inatteso in {path.name}: {reader.fieldnames}")
+                  for r in reader:
+                      rows+=1
+                      try:
+                          sid=int(r["station_id"])
+                          day=r["date"].strip()
+                          rawfuel=r["fuel"].strip().lower()
+                          price=float(r["price"])
+                      except Exception:
+                          continue
+                      fuel=fuel_map.get(rawfuel)
+                      if not fuel:
+                          continue
+                      if not (0.5 <= price <= 5.0):
+                          continue
+                      if not day.startswith(f"{year}-"):
+                          continue
+                      # Se ci fossero duplicati per stazione/carburante/giorno,
+                      # conserva l'ultima riga del dataset.
+                      station_data[sid][fuel][day]=price
+                      valid+=1
+
+          print("\nRighe lette:",rows)
+          print("Righe Benzina/Gasolio valide:",valid)
+          print("Impianti:",len(station_data))
+
+          def loadgz(p):
+              if not p.exists(): return {}
+              with gzip.open(p,"rt",encoding="utf-8") as f:return json.load(f)
+
+          def savegz(p,o):
+              p.parent.mkdir(parents=True,exist_ok=True)
+              t=p.with_name(p.name+".tmp")
+              with gzip.open(t,"wt",encoding="utf-8",compresslevel=9) as f:
+                  json.dump(o,f,ensure_ascii=False,separators=(",",":"))
+              t.replace(p)
+
+          modified=0
+          points=0
+          for sid,fuels in station_data.items():
+              p=OUT/f"{sid//1000:03d}"/f"{sid}.json.gz"
+              obj=loadgz(p)
+              obj["id"]=sid
+              obj["fonte"]="fuel-prices.eu / Osservaprezzi Carburanti MIMIT"
+              obj["trimestre"]=qtag
+              obj["tipo"]="snapshot_giornaliero"
+              obj["aggiornato_il"]=datetime.now(timezone.utc).isoformat()
+              daily=obj.setdefault("giornalieri",{})
+              before=json.dumps(daily,sort_keys=True,separators=(",",":"))
+              for fuel,byday in fuels.items():
+                  # sostituisce solo il trimestre richiesto per quel carburante
+                  old={d:p for d,p in daily.get(fuel,[]) if not (
+                      d.startswith(f"{year}-") and ((int(d[5:7])-1)//3+1)==quarter
+                  )}
+                  old.update(byday)
+                  daily[fuel]=[[d,old[d]] for d in sorted(old)]
+                  points+=len(byday)
+              after=json.dumps(daily,sort_keys=True,separators=(",",":"))
+              if before!=after or not p.exists():
+                  savegz(p,obj)
+                  modified+=1
+
+          manifest={
+              "fonte":"fuel-prices.eu / Osservaprezzi Carburanti MIMIT",
+              "licenza_sorgente_italia":"Italian Open Data License 2.0",
+              "trimestre":qtag,
+              "mesi_disponibili":[p.name[18:25] for p in files],
+              "tipo":"snapshot_giornaliero",
+              "priorita":"fallback; MIMIT trimestrale ufficiale prevale",
+              "impianti":len(station_data),
+              "punti_importati":points,
+              "file_modificati":modified,
+              "aggiornato_il":datetime.now(timezone.utc).isoformat()
+          }
+          (OUT/"manifest.json").write_text(
+              json.dumps(manifest,ensure_ascii=False,indent=2),encoding="utf-8"
+          )
+          print("\nRISULTATO")
+          print(json.dumps(manifest,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Verifica impianto campione 48907
+        shell: bash
+        run: |
+          python - <<'PY'
+          import gzip,json
+          from pathlib import Path
+          p=Path("data/fallback_mensile/048/48907.json.gz")
+          if not p.exists():
+              print("48907 non presente nel trimestre importato.")
+              raise SystemExit(0)
+          with gzip.open(p,"rt",encoding="utf-8") as f:o=json.load(f)
+          print("ID:",o.get("id"))
+          print("Fonte:",o.get("fonte"))
+          for fuel,arr in o.get("giornalieri",{}).items():
+              print("\n",fuel)
+              for day,price in arr:
+                  if day in {
+                      "2026-09-02","2026-09-06","2026-09-09",
+                      "2026-09-13","2026-09-15","2026-09-26"
+                  }:
+                      print(day,price)
+          PY
+
+      - name: Commit fallback mensile su gh-pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/fallback_mensile
+          if git diff --cached --quiet; then
+            echo "Nessuna modifica da salvare."
+          else
+            git commit -m "Backfill ${GITHUB_RUN_ID} fuel-prices.eu"
+            git push origin gh-pages
+          fi
+
+      - name: Avvia deploy Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run deploy_site.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main
