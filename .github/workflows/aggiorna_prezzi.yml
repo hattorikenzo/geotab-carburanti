@@ -29,37 +29,67 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Aggiorna prezzi e impianti
+      - name: Scarica CSV MIMIT con retry
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/mimit
+
+          download() {
+            local url="$1"
+            local out="$2"
+            echo "Download: $url"
+            curl \
+              --fail --location --silent --show-error \
+              --connect-timeout 30 \
+              --max-time 300 \
+              --retry 8 \
+              --retry-delay 15 \
+              --retry-max-time 1800 \
+              --retry-all-errors \
+              --user-agent "Mozilla/5.0 GitHub-Actions geotab-carburanti" \
+              -o "$out.tmp" "$url"
+            test -s "$out.tmp"
+            mv "$out.tmp" "$out"
+            echo "OK: $(du -h "$out" | cut -f1)"
+          }
+
+          download \
+            "https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv" \
+            "/tmp/mimit/prezzo_alle_8.csv"
+
+          download \
+            "https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv" \
+            "/tmp/mimit/anagrafica_impianti_attivi.csv"
+
+      - name: Aggiorna dataset
         shell: bash
         run: |
           cat > /tmp/update.py <<'PY'
-          import csv, gzip, io, json, math, urllib.request
+          import csv, gzip, io, json, math
           from collections import defaultdict
           from datetime import datetime, timezone
           from pathlib import Path
 
           ROOT=Path("repo/data")
-          PRICE_URL="https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
-          STATION_URL="https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv"
-
-          def download(url):
-              req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0"})
-              with urllib.request.urlopen(req,timeout=180) as r:
-                  return r.read()
+          PRICE_FILE=Path("/tmp/mimit/prezzo_alle_8.csv")
+          STATION_FILE=Path("/tmp/mimit/anagrafica_impianti_attivi.csv")
 
           def clean(x): return (x or "").strip().lstrip("\ufeff")
 
-          def reader(data):
+          def reader(path):
+              data=path.read_bytes()
               try: text=data.decode("utf-8-sig")
               except UnicodeDecodeError: text=data.decode("latin-1")
               lines=text.splitlines()
               sample="\n".join(lines[:12])
-              delim="|" if sample.count("|")>sample.count(";") else ";"
+              delim="|" if sample.count("|") > sample.count(";") else ";"
               h=next((i for i,l in enumerate(lines[:30]) if "idimpianto" in l.lower()),None)
-              if h is None: raise RuntimeError("Header idImpianto non trovato")
+              if h is None: raise RuntimeError(f"Header idImpianto non trovato in {path}")
               return csv.DictReader(io.StringIO("\n".join(lines[h:])),delimiter=delim)
 
           def fmap(r): return {clean(x).lower():x for x in (r.fieldnames or []) if x}
+
           def val(row,fm,*names):
               for n in names:
                   k=fm.get(n.lower())
@@ -79,8 +109,8 @@ jobs:
                   except ValueError: pass
               return datetime.fromisoformat(x.replace("Z","+00:00")).replace(tzinfo=None)
 
-          # ---------- PREZZI CORRENTI ----------
-          pr=reader(download(PRICE_URL)); pf=fmap(pr)
+          # PREZZI
+          pr=reader(PRICE_FILE); pf=fmap(pr)
           incoming=defaultdict(dict)
           rows=bad=0
           max_dt=None
@@ -96,8 +126,7 @@ jobs:
                   if sid<=0 or not fuel or price<=0: raise ValueError()
                   key=f"{fuel}|{sv}"
                   old=incoming[sid].get(key)
-                  if old is None or dt>old[0]:
-                      incoming[sid][key]=(dt,price)
+                  if old is None or dt>old[0]: incoming[sid][key]=(dt,price)
                   if max_dt is None or dt>max_dt: max_dt=dt
               except Exception:
                   bad+=1
@@ -105,11 +134,9 @@ jobs:
           changed_files=added_changes=ignored_old=0
 
           for sid,keys in incoming.items():
-              bucket=f"{sid//1000:03d}"
-              p=ROOT/"prezzi"/bucket/f"{sid}.json.gz"
+              p=ROOT/"prezzi"/f"{sid//1000:03d}"/f"{sid}.json.gz"
               if p.exists():
-                  with gzip.open(p,"rt",encoding="utf-8") as f:
-                      obj=json.load(f)
+                  with gzip.open(p,"rt",encoding="utf-8") as f: obj=json.load(f)
               else:
                   p.parent.mkdir(parents=True,exist_ok=True)
                   obj={"id":sid,"prezzi":{}}
@@ -118,34 +145,29 @@ jobs:
               for key,(dt,price) in keys.items():
                   hist=obj.setdefault("prezzi",{}).setdefault(key,[])
                   stamp=dt.strftime("%Y-%m-%dT%H:%M:%S")
-
                   if hist:
                       last_stamp=str(hist[-1][0])
                       last_price=float(hist[-1][1])
-                      # Non inserire dati anteriori/uguali a quelli già archiviati.
                       if stamp<=last_stamp:
                           ignored_old+=1
                           continue
-                      # Nessuna variazione: non serve una nuova riga.
                       if abs(last_price-price)<1e-9:
                           continue
-
                   hist.append([stamp,price])
                   added_changes+=1
                   dirty=True
 
               if dirty:
-                  tmp=p.with_suffix(p.suffix+".tmp")
+                  tmp=p.with_name(p.name+".tmp")
                   with gzip.open(tmp,"wt",encoding="utf-8",compresslevel=9) as f:
                       json.dump(obj,f,ensure_ascii=False,separators=(",",":"))
                   tmp.replace(p)
                   changed_files+=1
 
-          # ---------- ANAGRAFICA / INDICE GEOGRAFICO ----------
-          sr=reader(download(STATION_URL)); sf=fmap(sr)
+          # ANAGRAFICA
+          sr=reader(STATION_FILE); sf=fmap(sr)
           cells=defaultdict(list)
           station_count=station_bad=0
-
           for row in sr:
               try:
                   sid=int(val(row,sf,"idImpianto"))
@@ -163,15 +185,12 @@ jobs:
               except Exception:
                   station_bad+=1
 
-          geo=ROOT/"geo"
-          geo.mkdir(parents=True,exist_ok=True)
+          geo=ROOT/"geo"; geo.mkdir(parents=True,exist_ok=True)
           for old in geo.glob("*.json"): old.unlink()
           for (cy,cx),items in cells.items():
               (geo/f"{cy}_{cx}.json").write_text(
-                  json.dumps(items,ensure_ascii=False,separators=(",",":")),encoding="utf-8"
-              )
+                  json.dumps(items,ensure_ascii=False,separators=(",",":")),encoding="utf-8")
 
-          # ---------- MANIFEST ----------
           mp=ROOT/"manifest.json"
           manifest=json.loads(mp.read_text(encoding="utf-8")) if mp.exists() else {}
           manifest["version"]=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -196,16 +215,16 @@ jobs:
 
       - name: Commit dataset
         id: commit
-        shell: bash
         working-directory: repo
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Nessuna modifica da pubblicare."
+            echo "Nessuna modifica."
           else
             git commit -m "Aggiornamento MIMIT $(date -u +%Y-%m-%d)"
             git push origin gh-pages
