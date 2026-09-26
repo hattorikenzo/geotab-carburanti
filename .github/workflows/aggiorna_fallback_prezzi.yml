@@ -1,4 +1,4 @@
-name: Aggiorna fallback prezzi Open Carburanti
+name: Aggiorna fallback prezzi Open Carburanti v3
 
 on:
   workflow_dispatch:
@@ -145,7 +145,11 @@ jobs:
 
           def parse_date(match):
               day, month, year = map(int, match.group(1, 2, 3))
-              hh = int(match.group(4) or 0)
+              # Se la fonte non espone l'orario NON lo trasformiamo in 00:00:
+              # salviamo la sola data, così l'Add-In potrà trattarla come dato giornaliero.
+              if match.group(4) is None:
+                  return f"{year:04d}-{month:02d}-{day:02d}"
+              hh = int(match.group(4))
               mm = int(match.group(5) or 0)
               ss = int(match.group(6) or 0)
               return f"{year:04d}-{month:02d}-{day:02d}T{hh:02d}:{mm:02d}:{ss:02d}"
@@ -173,9 +177,25 @@ jobs:
                   return url, []
               response.raise_for_status()
 
-              soup = BeautifulSoup(response.text, "html.parser")
+              html = response.text
+              soup = BeautifulSoup(html, "html.parser")
               found = []
               seen = set()
+
+              # Diagnostica: serve a capire se date presenti nella pagina vengono
+              # perse dal parser oppure non sono proprio incluse nell'HTML ricevuto.
+              dates_html = sorted({
+                  f"{int(m.group(3)):04d}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+                  for m in date_re.finditer(soup.get_text(" ", strip=True))
+              })
+              print(f"  URL: {url}")
+              print(f"  HTML: {len(html)} byte, tabelle: {len(soup.find_all('table'))}")
+              if dates_html:
+                  print(f"  Date HTML: {dates_html[0]} .. {dates_html[-1]} ({len(dates_html)} date distinte)")
+                  sept9 = f"{now.year:04d}-09-09"
+                  print(f"  09/09 presente nell'HTML: {'SI' if sept9 in dates_html else 'NO'}")
+              else:
+                  print("  Nessuna data riconosciuta nell'HTML.")
 
               # Estrae righe tabellari mantenendo l'ultima data incontrata,
               # perché alcune tabelle raggruppano più carburanti sotto la stessa data.
@@ -217,6 +237,18 @@ jobs:
                           seen.add(record)
                           found.append(record)
 
+              # Segnala prezzi multipli dello stesso carburante/servizio nella
+              # stessa data: senza orario non possiamo stabilire quale fosse in vigore.
+              by_day = {}
+              for fuel, service, dt, price in found:
+                  key = (fuel, service, dt[:10])
+                  by_day.setdefault(key, set()).add(price)
+              ambiguous = {k: sorted(v) for k, v in by_day.items() if len(v) > 1}
+              if ambiguous:
+                  print("  ATTENZIONE - giornate con più prezzi e orario non determinabile:")
+                  for k, vals in sorted(ambiguous.items()):
+                      print(f"    {k[2]} {k[0]} servizio={k[1]}: {vals}")
+              print(f"  Record estratti dal parser: {len(found)}")
               return url, found
 
           summary = {
