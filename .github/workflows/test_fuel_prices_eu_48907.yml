@@ -1,0 +1,120 @@
+name: Test Fuel Prices EU 48907
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Scarica dataset settembre 2026
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://www.fuel-prices.eu/data/fp-d4-stations-it-2026-09.csv.gz"
+          echo "Download: $URL"
+          curl -fL --retry 4 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+            -A "Mozilla/5.0 (geotab-carburanti test)" \
+            "$URL" -o /tmp/italy-2026-09.csv.gz
+          ls -lh /tmp/italy-2026-09.csv.gz
+          gzip -t /tmp/italy-2026-09.csv.gz
+          echo "GZIP OK"
+
+      - name: Analizza ID 48907
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv, gzip, json, re
+          from datetime import datetime
+          from pathlib import Path
+
+          PATH=Path("/tmp/italy-2026-09.csv.gz")
+          TARGET="48907"
+          WANTED={"2026-09-02","2026-09-06","2026-09-09","2026-09-13","2026-09-15","2026-09-26"}
+
+          def norm(s):
+              return re.sub(r"[^a-z0-9]+","",str(s).lower())
+
+          with gzip.open(PATH,"rt",encoding="utf-8-sig",errors="replace",newline="") as f:
+              sample=f.read(65536)
+              f.seek(0)
+              try:
+                  dialect=csv.Sniffer().sniff(sample, delimiters=",;|\t")
+                  delim=dialect.delimiter
+              except Exception:
+                  delim=","
+              reader=csv.DictReader(f,delimiter=delim)
+              fields=reader.fieldnames or []
+              print("Separatore:",repr(delim))
+              print("Colonne:",fields)
+
+              fmap={norm(x):x for x in fields}
+              # Supporta diversi nomi possibili senza assumere lo schema.
+              def col(*names):
+                  for n in names:
+                      if norm(n) in fmap:return fmap[norm(n)]
+                  return None
+
+              station_col=col("station_id","stationid","idImpianto","id")
+              date_col=col("date","datetime","timestamp","observed_at","recorded_at","dtComu")
+              fuel_col=col("fuel","fuel_type","descCarburante","product")
+              price_col=col("price","prezzo","price_eur")
+              self_col=col("isSelf","self","service","mode")
+
+              print("Mappatura:",json.dumps({
+                  "station":station_col,"date":date_col,"fuel":fuel_col,
+                  "price":price_col,"self":self_col
+              },ensure_ascii=False))
+
+              if not station_col:
+                  raise SystemExit("ERRORE: colonna ID stazione non riconosciuta.")
+
+              rows=[]
+              for row in reader:
+                  sid=str(row.get(station_col,"")).strip()
+                  # Accetta ID numerico puro o ID incorporato in una stringa.
+                  if sid != TARGET and not re.search(rf"(^|\D){TARGET}(\D|$)",sid):
+                      continue
+                  rows.append(row)
+
+          print(f"\nRecord totali trovati per {TARGET}: {len(rows)}")
+          if not rows:
+              raise SystemExit("NESSUN RECORD per 48907")
+
+          print("\nPRIMI 5 RECORD GREZZI")
+          for r in rows[:5]:
+              print(json.dumps(r,ensure_ascii=False))
+
+          def rowdate(r):
+              if not date_col:return ""
+              v=str(r.get(date_col,""))
+              m=re.search(r"2026[-/](\d{1,2})[-/](\d{1,2})",v)
+              if m:return f"2026-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+              m=re.search(r"(\d{1,2})[-/](\d{1,2})[-/]2026",v)
+              if m:return f"2026-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
+              return ""
+
+          print("\nDATE CAMPIONE")
+          found_dates=set()
+          for r in rows:
+              d=rowdate(r)
+              if d in WANTED:
+                  found_dates.add(d)
+                  out={
+                      "data":d,
+                      "id":r.get(station_col),
+                      "carburante":r.get(fuel_col) if fuel_col else None,
+                      "prezzo":r.get(price_col) if price_col else None,
+                      "self":r.get(self_col) if self_col else None,
+                      "record":r
+                  }
+                  print(json.dumps(out,ensure_ascii=False))
+
+          print("\nRIEPILOGO DATE")
+          for d in sorted(WANTED):
+              print(d, "OK" if d in found_dates else "NON TROVATA")
+          PY
