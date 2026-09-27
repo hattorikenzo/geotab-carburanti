@@ -6,6 +6,8 @@ on:
     branches: [main]
     paths:
       - "*.html"
+      - "*.js"
+      - "*.css"
       - ".github/workflows/deploy_site.yml"
 
 permissions:
@@ -33,42 +35,54 @@ jobs:
           ref: gh-pages
           path: dataset
 
+      - name: Verifica file Add-In
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f main/index.html
+          test -f main/costiCarburante.js
+          test -f main/costiCarburante.css
+          echo "OK: tutti i file Add-In sono presenti"
+
       - name: Prepara sito
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf site
           mkdir -p site
+
+          test -d dataset/data
           cp -a dataset/data site/data
 
-          # Pubblica automaticamente tutti gli HTML presenti nella root di main.
-          find main -maxdepth 1 -type f -name '*.html' -exec cp {} site/ \;
+          cp main/index.html site/index.html
+          cp main/costiCarburante.js site/costiCarburante.js
+          cp main/costiCarburante.css site/costiCarburante.css
 
-          # Se non esiste ancora index.html, crea una pagina minima.
-          if [ ! -f site/index.html ]; then
-            cat > site/index.html <<'HTML'
-          <!doctype html>
-          <html lang="it">
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width,initial-scale=1">
-            <title>Geotab Carburanti</title>
-          </head>
-          <body>
-            <h1>Geotab Carburanti</h1>
-            <p>Dataset MIMIT online.</p>
-          </body>
-          </html>
-          HTML
-          fi
+          find main -maxdepth 1 -type f -name '*.html' ! -name 'index.html' -exec cp {} site/ \;
 
           touch site/.nojekyll
 
-          echo "Pagine HTML pubblicate:"
-          find site -maxdepth 1 -type f -name '*.html' -printf '%f\n' | sort
+      - name: Verifica sito prima del deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== FILE PUBBLICATI ==="
+          find site -maxdepth 1 -type f -printf '%f\n' | sort
+
+          test -s site/index.html
+          test -s site/costiCarburante.js
+          test -s site/costiCarburante.css
+
+          grep -q 'costiCarburante.css' site/index.html
+          grep -q 'costiCarburante.js' site/index.html
+          grep -q 'window.geotab.addin.costiCarburante' site/costiCarburante.js
 
           test -f site/data/manifest.json
           test -f site/data/prezzi/048/48907.json.gz
-          test -f site/test-48907-v3.html
+
+          echo "OK: Add-In completo"
+          echo "OK: dataset presente"
 
       - name: Configura Pages
         uses: actions/configure-pages@v5
