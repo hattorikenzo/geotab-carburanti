@@ -1,0 +1,30 @@
+<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Costi Carburante</title><link rel="stylesheet" href="./costiCarburante.css?v=15"></head><body><div id="costi-carburante-root"><div class="cc-wrap">
+<h1>Costi Carburante</h1>
+<div class="cc-card">
+<div class="cc-topline">
+  <div class="cc-controls">
+    <div class="cc-vehicle"><label for="vehicle">Veicolo</label><select id="vehicle"><option>Caricamento veicoli…</option></select></div>
+    <div><label for="dateFrom">Data iniziale</label><input id="dateFrom" type="date"></div>
+    <div><label for="dateTo">Data finale</label><input id="dateTo" type="date"></div>
+    <button id="load" disabled>Carica storico</button>
+    <div class="cc-export">
+      <button id="pdf" class="cc-secondary" disabled>PDF</button>
+      <button id="excel" class="cc-secondary" disabled>Excel</button>
+      <button id="print" class="cc-secondary" disabled>Stampa</button>
+    </div>
+  </div>
+  <div id="vehiclePhoto" class="cc-photo" aria-label="Foto generica veicolo">
+    <div class="cc-photo-placeholder">🚗</div>
+  </div>
+</div>
+<div id="status" class="cc-status">Connessione a MyGeotab…</div></div>
+<div class="cc-card"><div class="cc-stats">
+<div class="cc-stat"><small>Rifornimenti</small><strong id="n">0</strong></div>
+<div class="cc-stat"><small>Litri</small><strong id="liters">0,00 L</strong></div>
+<div class="cc-stat"><small>Costo totale verificato</small><strong id="total">€ 0,00</strong></div>
+<div class="cc-stat"><small>Prezzo medio verificato</small><strong id="avg">—</strong></div>
+</div></div>
+<div class="cc-card"><div class="cc-tablewrap"><table>
+<thead><tr><th>Data rifornimento</th><th>Distributore rilevato</th><th>Carburante</th><th>Prezzo €/L</th><th>Fonte</th><th>Litri</th><th>Costo totale</th></tr></thead>
+<tbody id="rows"><tr><td colspan="7" class="cc-muted">Seleziona un veicolo e il periodo.</td></tr></tbody>
+</table></div></div></div></div><script src="./costiCarburante.js?v=15"></script></body></html>
