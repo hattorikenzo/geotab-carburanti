@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v31 caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v32 caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -155,22 +155,47 @@
                get("Diagnostic",{},50000),
                get("UnitOfMeasure",{},50000).catch(()=>[])
               ]);
-              let unitMap=new Map((units||[]).map(u=>[String(u.id),normText([u.name,u.abbreviation,u.symbol].filter(Boolean).join(" "))]));
+              let unitMap=new Map((units||[]).map(u=>[
+               String(u.id),
+               normText([u.name,u.abbreviation,u.symbol].filter(Boolean).join(" "))
+              ]));
+
               let candidates=[];
               for(const d of diags||[]){
                let name=normText(d.name);
                let uid=d.unitOfMeasure&&d.unitOfMeasure.id?String(d.unitOfMeasure.id):"";
                let unit=unitMap.get(uid)||normText(d.unitOfMeasure&&d.unitOfMeasure.name);
-               let fuelLevel=(name.includes("fuel")&&name.includes("level"))||(name.includes("carbur")&&name.includes("livell"));
+
+               // Priorità assoluta al parametro mostrato in MyGeotab come
+               // "LIVELLO CARBURANTE MISURE" / fuel level measurement.
+               let exactMeasures =
+                (name.includes("livello")&&name.includes("carbur")&&name.includes("misur")) ||
+                (name.includes("fuel")&&name.includes("level")&&
+                 (name.includes("measure")||name.includes("measurement")));
+
+               let fuelLevel =
+                (name.includes("fuel")&&name.includes("level")) ||
+                (name.includes("carbur")&&name.includes("livell"));
+
                let liters=/\bl\b|liter|litre|litri|litro/.test(unit);
                let percent=/%|percent|percentage|percentuale/.test(unit);
-               if(fuelLevel&&!percent)candidates.push({d,unit,score:(liters?100:0)+(name.includes("volume")?50:0)});
+
+               if((exactMeasures||fuelLevel)&&!percent){
+                let score=0;
+                if(exactMeasures)score+=1000;
+                if(liters)score+=300;
+                if(name.includes("volume"))score+=100;
+                if(name.includes("misur")||name.includes("measure"))score+=50;
+                candidates.push({d,unit,score});
+               }
               }
+
               candidates.sort((a,b)=>b.score-a.score);
               if(candidates.length)fuelVolumeDiagnosticId=candidates[0].d.id;
-              console.log("Diagnostica livello carburante volume:",fuelVolumeDiagnosticId,candidates.slice(0,5).map(x=>({id:x.d.id,name:x.d.name,unit:x.unit,score:x.score})));
+              console.log("Diagnostica LIVELLO CARBURANTE MISURE:",fuelVolumeDiagnosticId,
+               candidates.slice(0,8).map(x=>({id:x.d.id,name:x.d.name,unit:x.unit,score:x.score})));
              }catch(e){
-              console.warn("Impossibile risolvere la diagnostica Fuel Level Volume:",e);
+              console.warn("Impossibile risolvere LIVELLO CARBURANTE MISURE:",e);
              }
              return fuelVolumeDiagnosticId;
             }
@@ -205,52 +230,29 @@
 
             function findVolumeRise(samples,fillLiters){
              let s=realSamples(samples);
+             let best=null;
+
              for(let i=1;i<s.length;i++){
-              let a=s[i-1],b=s[i],rise=b.data-a.data;
-              if(rise<=0)continue;
+              let a=s[i-1],b=s[i];
+              let rise=Number(b.data)-Number(a.data);
+              if(!Number.isFinite(rise)||rise<=0)continue;
 
-              // Anti-rumore: il salto deve essere compatibile con un rifornimento.
-              let threshold=Math.max(3,Math.min(10,(Number(fillLiters)||0)*0.20));
-              if(rise<threshold)continue;
+              // Il salto deve essere almeno 3 L per eliminare piccole oscillazioni.
+              if(rise<3)continue;
 
-              // NUOVA REGOLA:
-              // il nuovo livello deve restare sostanzialmente stabile per almeno 2 minuti.
-              // Consideriamo stabile una variazione massima di 1 litro rispetto al valore
-              // raggiunto dopo il delta positivo.
-              let start=new Date(b.date);
-              if(isNaN(start))continue;
-              let targetEnd=new Date(start.getTime()+REFUEL_STABLE_MINUTES*60000);
-              let stableUntil=start,stableSamples=1,confirmed=false;
+              let candidate={
+               date:b.date,
+               before:Number(a.data),
+               after:Number(b.data),
+               rise:rise
+              };
 
-              for(let j=i+1;j<s.length;j++){
-               let c=s[j],ct=new Date(c.date);
-               if(isNaN(ct))continue;
-
-               // Se il livello cambia oltre la tolleranza prima dei 2 minuti,
-               // il delta non viene considerato un rifornimento confermato.
-               if(Math.abs(c.data-b.data)>REFUEL_STABLE_TOLERANCE_L)break;
-
-               stableUntil=ct;
-               stableSamples++;
-               if(ct>=targetEnd){
-                confirmed=true;
-                break;
-               }
-              }
-
-              if(confirmed){
-               return {
-                date:b.date,
-                before:a.data,
-                after:b.data,
-                rise,
-                stableMinutes:(stableUntil-start)/60000,
-                stableUntil:stableUntil.toISOString(),
-                stableSamples
-               };
-              }
+              // Nel periodo successivo al FillUp prendiamo il primo vero salto
+              // significativo: è il passaggio dal livello prima del rifornimento
+              // al nuovo livello misurato.
+              if(!best||new Date(candidate.date)<new Date(best.date))best=candidate;
              }
-             return null;
+             return best;
             }
 
             function ignitionIsOn(v){return Number(v)>0}
@@ -330,7 +332,7 @@
               }
 
               if(result.volumeRise)result.message="Aumento volume trovato, ma nessun impianto MIMIT disponibile nella griglia dati attorno alla posizione rilevata.";
-              else result.message="Nessun delta positivo del volume carburante rimasto stabile per almeno 2 minuti trovato nelle 48 ore successive.";
+              else result.message="Nessun delta positivo del volume carburante trovato nelle 48 ore successive.";
               return result;
              }catch(e){
               result.message="Errore recupero rifornimento: "+(e&&e.message?e.message:String(e));
@@ -345,13 +347,13 @@
 
              // I litri finali provengono SEMPRE dal Profilo dati motore:
              // "Livello del carburante (Volume) (L)".
-             // Delta positivo stabile >= 2 minuti, poi correzione -23%.
+             // Delta positivo LIVELLO CARBURANTE MISURE, poi correzione -23%.
              let recovery=await recoveryFromNextIgnition(f,deviceId);
              out.recovery=recovery;
 
              if(recovery.volumeRise && Number(recovery.volumeRise.rise)>0){
               out.rawFuelVolumeDelta=Number(recovery.volumeRise.rise);
-              out.liters=out.rawFuelVolumeDelta*FUEL_VOLUME_CORRECTION_FACTOR;
+              out.liters=Math.max(0,out.rawFuelVolumeDelta*FUEL_VOLUME_CORRECTION_FACTOR);
               out.litersFromDelta=true;
               out.date=recovery.volumeRise.date;
              }else{
