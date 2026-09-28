@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v33 caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v34 caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -340,6 +340,126 @@
              }
             }
 
+            const fuelMeasureCache=new Map();
+
+            function diagnosticUnitText(d,unitMap){
+             let uid=d&&d.unitOfMeasure&&d.unitOfMeasure.id?String(d.unitOfMeasure.id):"";
+             return (unitMap.get(uid)||normText(d&&d.unitOfMeasure&&d.unitOfMeasure.name)||"").trim();
+            }
+
+            async function detectFuelMeasureDiagnosticForVehicle(deviceId,fillDate){
+             // La scelta è specifica per veicolo e viene memorizzata.
+             if(fuelMeasureCache.has(deviceId))return fuelMeasureCache.get(deviceId);
+
+             let center=new Date(fillDate);
+             let from=new Date(center.getTime()-60*60*1000);
+             let to=new Date(center.getTime()+48*60*60*1000);
+
+             // Leggiamo un intervallo LIMITATO di StatusData senza imporre a priori
+             // un Diagnostic ID: così scopriamo quale segnale in litri è realmente
+             // presente su QUESTO veicolo.
+             let rows=await get("StatusData",{
+              deviceSearch:{id:deviceId},
+              fromDate:from.toISOString(),
+              toDate:to.toISOString()
+             },50000).catch(()=>[]);
+
+             if(!rows||!rows.length)return null;
+
+             let ids=[...new Set(rows.map(r=>r.diagnostic&&r.diagnostic.id).filter(Boolean).map(String))];
+             let [diags,units]=await Promise.all([
+              get("Diagnostic",{},50000).catch(()=>[]),
+              get("UnitOfMeasure",{},50000).catch(()=>[])
+             ]);
+             let wanted=new Set(ids);
+             let unitMap=new Map((units||[]).map(u=>[
+              String(u.id),
+              normText([u.name,u.abbreviation,u.symbol].filter(Boolean).join(" "))
+             ]));
+             let defMap=new Map((diags||[]).filter(d=>wanted.has(String(d.id))).map(d=>[String(d.id),d]));
+
+             let groups=new Map();
+             for(const r of rows){
+              if(!r.id)continue; // solo misure realmente memorizzate, non interpolate
+              let id=r.diagnostic&&r.diagnostic.id?String(r.diagnostic.id):"";
+              if(!id)continue;
+              if(!groups.has(id))groups.set(id,[]);
+              groups.get(id).push(r);
+             }
+
+             let candidates=[];
+             for(const [id,list] of groups){
+              let d=defMap.get(id);
+              if(!d)continue;
+              let unit=diagnosticUnitText(d,unitMap);
+              let name=normText(d.name||"");
+
+              // Il parametro cercato deve essere una MISURA in litri. Non assumiamo
+              // che il nome sia identico tra marche/modelli.
+              let liters=/\bl\b|liter|litre|litri|litro/.test(unit);
+              if(!liters)continue;
+
+              list.sort((a,b)=>new Date(a.dateTime||a.date)-new Date(b.dateTime||b.date));
+              let bestRise=0,best=null;
+              for(let i=1;i<list.length;i++){
+               let a=list[i-1],b=list[i];
+               let av=Number(a.data),bv=Number(b.data);
+               if(!Number.isFinite(av)||!Number.isFinite(bv))continue;
+               let rise=bv-av;
+               // livello serbatoio plausibile; esclude contatori cumulativi in litri.
+               if(av>=0&&bv>=0&&av<=200&&bv<=200&&rise>=3&&rise>bestRise){
+                bestRise=rise;
+                best={before:av,after:bv,rise,date:b.dateTime||b.date};
+               }
+              }
+              if(!best)continue;
+
+              let score=bestRise;
+              if(name.includes("fuel")||name.includes("carbur"))score+=100;
+              if(name.includes("level")||name.includes("livell"))score+=100;
+              if(name.includes("measure")||name.includes("misur"))score+=40;
+              // penalizza diagnostiche evidentemente cumulative/consumo.
+              if(name.includes("used")||name.includes("consum")||name.includes("total"))score-=150;
+
+              candidates.push({id,d,name,unit,best,score});
+             }
+
+             candidates.sort((a,b)=>b.score-a.score);
+             let chosen=candidates[0]||null;
+             if(chosen)fuelMeasureCache.set(deviceId,chosen);
+             console.log("Fuel measure dinamica per veicolo",deviceId,chosen&&{
+              id:chosen.id,name:chosen.d.name,unit:chosen.unit,best:chosen.best
+             });
+             return chosen;
+            }
+
+            async function fuelRiseFromMeasuredStatus(f,deviceId){
+             let fillDate=f.dateTime||f.date||f.timestamp;
+             let detected=await detectFuelMeasureDiagnosticForVehicle(deviceId,fillDate);
+             if(!detected)return null;
+
+             // Una volta scoperto l'ID corretto per il veicolo, interroghiamo solo
+             // quella serie attorno al singolo FillUp.
+             let from=new Date(new Date(fillDate).getTime()-60*60*1000);
+             let to=new Date(new Date(fillDate).getTime()+48*60*60*1000);
+             let rows=await statusWindow(deviceId,detected.id,from,to).catch(()=>[]);
+             let s=realSamples(rows).sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+             // Primo salto significativo dopo l'evento FillUp. Il valore prima e
+             // quello dopo sono esattamente le misure in litri della serie scelta.
+             let fillMs=new Date(fillDate).getTime();
+             for(let i=1;i<s.length;i++){
+              let a=s[i-1],b=s[i];
+              let bt=new Date(b.date).getTime();
+              if(bt<fillMs-60*60*1000)continue;
+              let before=Number(a.data),after=Number(b.data),rise=after-before;
+              if(Number.isFinite(rise)&&before>=0&&after>=0&&before<=200&&after<=200&&rise>=3){
+               return {before,after,rise,date:b.date,diagnosticId:detected.id};
+              }
+             }
+             return null;
+            }
+
             function extremaLitersFromFillUp(f){
              let e=f&&f.tankLevelExtrema;
              if(!e)return null;
@@ -370,46 +490,27 @@
              let fuel=normalizeFuel(f.productType)||vehicleFuel;
              let out={date:originalDate,originalDate,liters:0,fuel,coords:originalCoords,recovery:null};
 
-             // FONTE LITRI v33:
-             // 1) usa direttamente tankLevelExtrema del FillUp: minimo e massimo
-             //    derivati dai StatusData del livello carburante;
-             // 2) solo se gli extrema non sono disponibili, prova la ricerca
-             //    StatusData del profilo motore.
-             let extrema=extremaLitersFromFillUp(f);
-             let recovery=null;
-             let rise=null;
+             // UNICA FONTE DEI LITRI:
+             // StatusData della diagnostica "Livello carburante - Misure" realmente
+             // presente sul veicolo. L'ID viene scoperto dinamicamente per ogni mezzo.
+             let rise=await fuelRiseFromMeasuredStatus(f,deviceId);
 
-             if(extrema && extrema.rise>0){
-              rise=extrema;
-              out.rawFuelVolumeDelta=extrema.rise;
-              out.date=extrema.date||originalDate;
-             }else{
-              recovery=await recoveryFromNextIgnition(f,deviceId);
-              out.recovery=recovery;
-              if(recovery.volumeRise && Number(recovery.volumeRise.rise)>0){
-               rise=recovery.volumeRise;
-               out.rawFuelVolumeDelta=Number(recovery.volumeRise.rise);
-               out.date=recovery.volumeRise.date||originalDate;
-              }
-             }
-
-             // Correzione richiesta: sottrazione del 23%.
-             // Esempio 22,4474 - 9,0000 = 13,4474; × 0,77 = 10,3545 L.
-             if(rise && Number(rise.rise)>0){
-              out.liters=Math.max(0,Number(rise.rise)*FUEL_VOLUME_CORRECTION_FACTOR);
+             if(rise&&Number(rise.rise)>0){
+              out.rawFuelVolumeDelta=Number(rise.rise);
+              out.liters=Math.max(0,out.rawFuelVolumeDelta*FUEL_VOLUME_CORRECTION_FACTOR);
               out.litersFromDelta=true;
+              out.date=rise.date||originalDate;
              }else{
               out.liters=0;
               out.litersUnavailable=true;
              }
 
-             // Stazione: prima posizione FillUp entro 500 m.
              let ns=null;
              if(originalCoords)ns=await nearestStation(originalCoords[0],originalCoords[1]);
 
-             // Recupero posizione solo quando necessario.
+             let recovery=null;
              if(!ns){
-              if(!recovery)recovery=await recoveryFromNextIgnition(f,deviceId);
+              recovery=await recoveryFromNextIgnition(f,deviceId);
               out.recovery=recovery;
               if(recovery.used&&recovery.station&&recovery.gps){
                ns=recovery.station;
