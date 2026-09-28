@@ -541,10 +541,10 @@
                   $("load").disabled=false;$("cc-status").className="cc-status ok";$("cc-status").textContent=`MyGeotab collegato. ${vehicles.length} veicoli disponibili.`;
                  }catch(e){$("cc-status").className="cc-status err";$("cc-status").textContent="Errore MyGeotab: "+e.message}
                 }
-                let uiBound=false, initialized=false;
+                let uiBound=false, dataLoaded=false, loading=false;
                 function bindUi(){
                  if(uiBound)return;
-                 const required=["load","vehicle","pdf","excel","print","dateFrom","dateTo","cc-status","rows","n","liters","total","avg","vehiclePhoto"];
+                 const required=["load","vehicle","pdf","excel","print","dateFrom","dateTo","status","rows","n","liters","total","avg","vehiclePhoto"];
                  for(const id of required)if(!$(id))throw new Error("Elemento HTML mancante: #"+id);
                  $("load").addEventListener("click",loadHistory);
                  $("vehicle").addEventListener("change",()=>{exportEnabled(false);lastItems=[];updateVehiclePhoto()});
@@ -552,31 +552,54 @@
                  $("excel").addEventListener("click",exportExcel);
                  $("print").addEventListener("click",printReport);
                  $("dateFrom").addEventListener("change",()=>{$("dateTo").min=$("dateFrom").value||""});
+                 setDefaultDates();
                  uiBound=true;
                 }
-                async function start(myApi){
-                 api=myApi;
-                 bindUi();
-                 if(initialized)return;
-                 initialized=true;
-                 try{await init(myApi)}
-                 catch(e){
-                  initialized=false;
-                  console.error("Avvio Costi Carburante:",e);
-                  if($("cc-status")){$("cc-status").className="cc-status err";$("cc-status").textContent="Errore avvio Add-In: "+(e&&e.message?e.message:String(e))}
+
+                async function loadMyGeotabData(myApi){
+                 if(dataLoaded||loading)return;
+                 loading=true;api=myApi;
+                 $("status").className="cc-status";
+                 $("status").textContent="MyGeotab collegato. Caricamento veicoli…";
+                 try{
+                  await loadCoverage();
+                  vehicles=await get("Device",{},50000);
+                  vehicles=(vehicles||[]).filter(v=>!v.isArchived).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+                  $("vehicle").innerHTML='<option value="">Seleziona un veicolo…</option>'+vehicles.map(v=>`<option value="${esc(v.id)}">${esc(v.name||v.id)}</option>`).join("");
+                  $("load").disabled=false;
+                  $("status").className="cc-status ok";
+                  $("status").textContent=`MyGeotab collegato. ${vehicles.length} veicoli disponibili.`;
+                  dataLoaded=true;
+                 }catch(e){
+                  console.error("Caricamento veicoli MyGeotab:",e);
+                  $("status").className="cc-status err";
+                  $("status").textContent="Errore MyGeotab: "+(e&&e.message?e.message:String(e));
+                 }finally{
+                  loading=false;
                  }
                 }
+
                 window.geotab=window.geotab||{};
                 window.geotab.addin=window.geotab.addin||{};
                 window.geotab.addin.costiCarburante=function(){
                  return {
                   initialize:function(myApi,state,callback){
-                   start(myApi).finally(()=>{if(callback)callback()});
+                   api=myApi;
+                   try{bindUi()}
+                   catch(e){
+                    console.error("Inizializzazione UI Costi Carburante:",e);
+                    if($("status")){$("status").className="cc-status err";$("status").textContent="Errore avvio Add-In: "+(e&&e.message?e.message:String(e))}
+                   }
+                   // IMPORTANTE: MyGeotab deve ricevere subito il callback.
+                   // Il caricamento dei veicoli avviene in focus(), quando la UI è pronta.
+                   if(callback)callback();
                   },
                   focus:function(myApi,state){
-                   if(myApi)start(myApi);
+                   api=myApi||api;
+                   try{bindUi()}catch(e){console.error(e);return}
+                   if(api)loadMyGeotabData(api);
                   },
-                  blur:function(){}
+                  blur:function(api,state){}
                  };
                 };
                 })();
