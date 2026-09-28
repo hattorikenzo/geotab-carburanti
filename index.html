@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v29 caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v30 caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -355,8 +355,15 @@
                ns=recovery.station;
                out.stationRecovered=true;
                out.coords=[recovery.gps.lat,recovery.gps.lon];
-               // La data effettiva del rifornimento è quella in cui il volume viene
-               // rilevato dopo il nuovo giro chiave; fallback all'Ignition/GPS.
+
+               // Il quantitativo effettivo viene preso dal delta positivo del
+               // Fuel Level Volume (L), già confermato stabile per almeno 2 minuti.
+               if(recovery.volumeRise && Number(recovery.volumeRise.rise)>0){
+                out.liters=Number(recovery.volumeRise.rise);
+                out.litersFromDelta=true;
+               }
+
+               // La data effettiva del rifornimento è quella del delta confermato.
                out.date=recovery.volumeRise?recovery.volumeRise.date:(recovery.ignition?recovery.ignition.date:recovery.gps.date);
               }
              }
@@ -382,15 +389,6 @@
               let sup=x.supplier?`<div class="cc-supplier">${esc(x.supplier.gestore||x.supplier.nome||"Impianto MIMIT")}</div><div class="cc-sub">${esc([x.supplier.bandiera,x.supplier.nome].filter(Boolean).join(" — "))}</div><div class="cc-sub">${esc(x.supplier.address)}${x.station?` · ${dec(x.station.distance,1)} m`:""}</div>`:`<span class="cc-warn">${esc(x.error||"Non identificato")}</span>`;
               let price=x.verified?`${dec(x.price.price,3)}<div class="cc-sub">${esc(dtLocal(x.price.date))}</div>`:`<span class="cc-warn">—</span>`,cost=x.verified?money(x.cost):"—",tr=document.createElement("tr");
               tr.innerHTML=`<td>${esc(dtLocal(x.date))}</td><td>${sup}</td><td>${esc(x.fuel||"—")}</td><td class="cc-num">${price}</td><td>${esc(x.source||"—")}</td><td class="cc-num">${dec(x.liters||0,2)} L</td><td class="cc-num"><b>${cost}</b></td>`;tb.appendChild(tr);
-              if(x.recovery){
-               let d=x.recovery,dr=document.createElement("tr");
-               let vol=d.volumeRise?`${dtLocal(d.volumeRise.date)}: ${dec(d.volumeRise.before,2)} L → ${dec(d.volumeRise.after,2)} L (+${dec(d.volumeRise.rise,2)} L)`:"—";
-               let ign=d.ignition?`${dtLocal(d.ignition.date)}${d.ignition.proxy?" (riferimento volume)":""}`:"—";
-               let gps=d.gps&&!d.gps.error?`${dec(d.gps.lat,6)}, ${dec(d.gps.lon,6)} @ ${dtLocal(d.gps.date)}`:"—";
-               let station=d.station?`${supplier(d.station).gestore||supplier(d.station).nome||"Impianto MIMIT"} · ${dec(d.station.distance,1)} m`:"—";
-               dr.innerHTML=`<td colspan="7" style="background:#fff8dc;padding:8px 10px;font-size:12px;line-height:1.55"><b>RECUPERO RIFORNIMENTO DA PROFILO DATI MOTORE</b><br><b>Livello carburante (Volume):</b> ${esc(vol)}<br><b>Giro chiave / Ignition ON:</b> ${esc(ign)} · <b>Primo GPS:</b> ${esc(gps)} · <b>MIMIT più vicino:</b> ${esc(station)}${d.message?`<br><b>Messaggio:</b> ${esc(d.message)}`:""}</td>`;
-               tb.appendChild(dr);
-              }
              }
              if(!items.length)tb.innerHTML='<tr><td colspan="7" class="cc-muted">Nessun rifornimento nel periodo selezionato.</td></tr>';
              $("n").textContent=items.length;$("liters").textContent=dec(tl,2)+" L";$("total").textContent=money(tc);$("avg").textContent=vl>0?dec(tc/vl,3)+" €/L":"—";
