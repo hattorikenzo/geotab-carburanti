@@ -1,4 +1,4 @@
-  (function(){
+ (function(){
     "use strict";
     const DATA_BASE="https://hattorikenzo.github.io/geotab-carburanti/data";
     const GRID=.05, MAX_STATION_METERS=500;
@@ -70,45 +70,122 @@
     async function fuelForVehicle(v){let f=normalizeFuel(v.fuelType||v.propulsionType||v.powertrainType);if(f)return f;let groups=(v.groups||[]).map(g=>String(g.id||g.name||"")).join(" ");return normalizeFuel(groups)}
 
     const FUEL_LEVEL_DIAGNOSTIC_ID="DiagnosticFuelLevelId";
-    const FUEL_LEVEL_MIN_RISE=8;
-    const FUEL_LEVEL_LOOKBACK_HOURS=12;
-    const FUEL_LEVEL_LOOKAHEAD_HOURS=36;
-    const FUEL_LEVEL_MIN_TIME_SHIFT_MINUTES=30;
-    const LOG_POSITION_MAX_DISTANCE_MINUTES=90;
+    const FUEL_LEVEL_MIN_RISE=5;
+    const FUEL_LEVEL_LOOKBACK_HOURS=6;
+    const FUEL_LEVEL_LOOKAHEAD_HOURS=42;
+    const FUEL_LEVEL_MAX_SAMPLE_GAP_HOURS=24;
+    const LOG_POSITION_WINDOW_MINUTES=120;
+
+    async function readFuelLevelRows(deviceId,from,to){
+     let base={deviceSearch:{id:deviceId},fromDate:from.toISOString(),toDate:to.toISOString()};
+     let rows=await get("StatusData",{...base,diagnosticSearch:{id:FUEL_LEVEL_DIAGNOSTIC_ID}},50000);
+     // Geotab raccomanda un fallback limitato quando il filtro KnownId non restituisce righe.
+     if(!rows||!rows.length){
+      let all=await get("StatusData",base,50000);
+      rows=(all||[]).filter(r=>r.diagnostic&&r.diagnostic.id===FUEL_LEVEL_DIAGNOSTIC_ID);
+     }
+     return (rows||[])
+      .map(r=>({date:new Date(r.dateTime),level:Number(r.data)}))
+      .filter(r=>!isNaN(r.date)&&Number.isFinite(r.level)&&r.level>=0&&r.level<=100)
+      .sort((a,b)=>a.date-b.date);
+    }
 
     async function fuelLevelCorrection(deviceId,fillDate){
      let base=new Date(fillDate);if(!deviceId||isNaN(base))return null;
-     let from=new Date(base.getTime()-FUEL_LEVEL_LOOKBACK_HOURS*3600000),to=new Date(base.getTime()+FUEL_LEVEL_LOOKAHEAD_HOURS*3600000);
+     let from=new Date(base.getTime()-FUEL_LEVEL_LOOKBACK_HOURS*3600000);
+     let to=new Date(base.getTime()+FUEL_LEVEL_LOOKAHEAD_HOURS*3600000);
      try{
-      let rows=await get("StatusData",{deviceSearch:{id:deviceId},diagnosticSearch:{id:FUEL_LEVEL_DIAGNOSTIC_ID},fromDate:from.toISOString(),toDate:to.toISOString()},50000);
-      rows=(rows||[]).map(r=>({date:new Date(r.dateTime),level:Number(r.data)})).filter(r=>!isNaN(r.date)&&Number.isFinite(r.level)&&r.level>=0&&r.level<=100).sort((a,b)=>a.date-b.date);
-      let best=null;
+      let rows=await readFuelLevelRows(deviceId,from,to);
+      if(rows.length<2)return null;
+
+      let candidates=[];
       for(let i=1;i<rows.length;i++){
-       let prev=rows[i-1],cur=rows[i],rise=cur.level-prev.level,gapMinutes=(cur.date-prev.date)/60000;
-       if(rise<FUEL_LEVEL_MIN_RISE||gapMinutes>360)continue;
-       let c={date:cur.date,before:prev.level,after:cur.level,rise,gapMinutes};
-       if(!best||c.rise>best.rise)best=c;
+       let prev=rows[i-1],cur=rows[i];
+       let rise=cur.level-prev.level;
+       let gapHours=(cur.date-prev.date)/3600000;
+       if(rise<FUEL_LEVEL_MIN_RISE||gapHours>FUEL_LEVEL_MAX_SAMPLE_GAP_HOURS)continue;
+       // Per correggere un FillUp anticipato ci interessa soprattutto il salto successivo.
+       if(cur.date<base)continue;
+       candidates.push({date:cur.date,before:prev.level,after:cur.level,rise,gapHours});
       }
-      if(!best||Math.abs(best.date-base)/60000<FUEL_LEVEL_MIN_TIME_SHIFT_MINUTES)return null;
-      let logs=await get("LogRecord",{deviceSearch:{id:deviceId},fromDate:new Date(best.date.getTime()-LOG_POSITION_MAX_DISTANCE_MINUTES*60000).toISOString(),toDate:new Date(best.date.getTime()+LOG_POSITION_MAX_DISTANCE_MINUTES*60000).toISOString()},50000);
+      if(!candidates.length)return null;
+
+      // Preferisce il primo vero aumento dopo il FillUp, non il salto più grande dell'intera finestra.
+      candidates.sort((a,b)=>a.date-b.date);
+      let best=candidates[0];
+
+      let logs=await get("LogRecord",{
+       deviceSearch:{id:deviceId},
+       fromDate:new Date(best.date.getTime()-LOG_POSITION_WINDOW_MINUTES*60000).toISOString(),
+       toDate:new Date(best.date.getTime()+LOG_POSITION_WINDOW_MINUTES*60000).toISOString()
+      },50000);
+
       let nearest=null;
-      for(const r of logs||[]){let d=new Date(r.dateTime),lat=Number(r.latitude),lon=Number(r.longitude);if(isNaN(d)||!Number.isFinite(lat)||!Number.isFinite(lon))continue;let delta=Math.abs(d-best.date);if(!nearest||delta<nearest.delta)nearest={lat,lon,delta}}
-      return {date:best.date,before:best.before,after:best.after,rise:best.rise,coords:nearest&&nearest.delta<=LOG_POSITION_MAX_DISTANCE_MINUTES*60000?[nearest.lat,nearest.lon]:null};
-     }catch(e){console.warn("Controllo livello carburante non disponibile:",e);return null}
+      for(const r of logs||[]){
+       let d=new Date(r.dateTime),lat=Number(r.latitude),lon=Number(r.longitude);
+       if(isNaN(d)||!Number.isFinite(lat)||!Number.isFinite(lon))continue;
+       let delta=Math.abs(d-best.date);
+       if(!nearest||delta<nearest.delta)nearest={lat,lon,delta,date:d};
+      }
+
+      return {
+       date:best.date,
+       before:best.before,
+       after:best.after,
+       rise:best.rise,
+       gapHours:best.gapHours,
+       coords:nearest?[nearest.lat,nearest.lon]:null
+      };
+     }catch(e){
+      console.warn("Controllo livello carburante non disponibile:",e);
+      return null;
+     }
+    }
+
+    async function tryStationAtOriginalFill(f){
+     let coords=fillCoords(f);
+     if(!coords)return {coords:null,station:null};
+     return {coords,station:await nearestStation(coords[0],coords[1])};
     }
 
     async function resolveFillMoment(f,deviceId){
-     let originalDate=f.dateTime||f.date||f.timestamp,originalCoords=fillCoords(f),c=await fuelLevelCorrection(deviceId,originalDate);
-     return c?{date:c.date.toISOString(),coords:c.coords||originalCoords,corrected:true,correction:c}:{date:originalDate,coords:originalCoords,corrected:false,correction:null};
+     let originalDate=f.dateTime||f.date||f.timestamp;
+     let original=await tryStationAtOriginalFill(f);
+
+     // Se Geotab ha già collocato il FillUp entro 500 m da un impianto MIMIT,
+     // non alteriamo data e posizione.
+     if(original.station){
+      return {date:originalDate,coords:original.coords,station:original.station,corrected:false,correction:null};
+     }
+
+     // Solo se la stazione non viene trovata, controlliamo il livello carburante
+     // fino al giorno successivo e usiamo il momento del primo aumento reale.
+     let c=await fuelLevelCorrection(deviceId,originalDate);
+     if(!c||!c.coords){
+      return {date:originalDate,coords:original.coords,station:null,corrected:false,correction:null};
+     }
+
+     let correctedStation=await nearestStation(c.coords[0],c.coords[1]);
+     return {
+      date:c.date.toISOString(),
+      coords:c.coords,
+      station:correctedStation,
+      corrected:true,
+      correction:c
+     };
     }
 
     async function processFill(f,vehicleFuel,deviceId){
      let liters=litersOf(f),originalDate=f.dateTime||f.date||f.timestamp,resolved=await resolveFillMoment(f,deviceId);
-     let coords=resolved.coords,date=resolved.date,dateKey=isoNoZone(date),fuel=normalizeFuel(f.productType)||vehicleFuel,out={date,originalDate,liters,fuel,coords,corrected:resolved.corrected,correction:resolved.correction};
+     let coords=resolved.coords,date=resolved.date,dateKey=isoNoZone(date),fuel=normalizeFuel(f.productType)||vehicleFuel;
+     let out={date,originalDate,liters,fuel,coords,corrected:resolved.corrected,correction:resolved.correction};
      if(!coords){out.error="Coordinate non disponibili";return out}
-     let ns=await nearestStation(coords[0],coords[1]);if(!ns){out.error="Impianto MIMIT non identificato entro "+MAX_STATION_METERS+" m";return out}
-     out.station=ns;out.supplier=supplier(ns);if(!fuel){out.error="Tipo carburante non riconosciuto";return out}
-     let hp=await historicalPrice(Number(ns.raw[0]),fuel,dateKey);if(!hp){out.error="Prezzo storico non disponibile";return out}
+     let ns=resolved.station;
+     if(!ns){out.error="Impianto MIMIT non identificato entro "+MAX_STATION_METERS+" m";return out}
+     out.station=ns;out.supplier=supplier(ns);
+     if(!fuel){out.error="Tipo carburante non riconosciuto";return out}
+     let hp=await historicalPrice(Number(ns.raw[0]),fuel,dateKey);
+     if(!hp){out.error="Prezzo storico non disponibile";return out}
      out.price=hp;out.source=hp.source||"MIMIT";out.cost=liters*hp.price;out.verified=true;return out;
     }
     function render(items){
@@ -117,7 +194,7 @@
       tl+=x.liters||0;if(x.verified){tc+=x.cost;vl+=x.liters}
       let sup=x.supplier?`<div class="cc-supplier">${esc(x.supplier.gestore||x.supplier.nome||"Impianto MIMIT")}</div><div class="cc-sub">${esc([x.supplier.bandiera,x.supplier.nome].filter(Boolean).join(" — "))}</div><div class="cc-sub">${esc(x.supplier.address)}${x.station?` · ${dec(x.station.distance,1)} m`:""}</div>`:`<span class="cc-warn">${esc(x.error||"Non identificato")}</span>`;
       let price=x.verified?`${dec(x.price.price,3)}<div class="cc-sub">${esc(dtLocal(x.price.date))}</div>`:`<span class="cc-warn">—</span>`,cost=x.verified?money(x.cost):"—",tr=document.createElement("tr");
-      tr.innerHTML=`<td>${esc(dtLocal(x.date))}${x.corrected?`<div class="cc-sub">Data corretta da livello carburante${x.correction?` · +${dec(x.correction.rise,1)}%`:""}</div><div class="cc-sub">FillUp Geotab: ${esc(dtLocal(x.originalDate))}</div>`:""}</td><td>${sup}</td><td>${esc(x.fuel||"—")}</td><td class="cc-num">${price}</td><td>${esc(x.source||"—")}</td><td class="cc-num">${dec(x.liters||0,2)} L</td><td class="cc-num"><b>${cost}</b></td>`;tb.appendChild(tr);
+      tr.innerHTML=`<td>${esc(dtLocal(x.date))}${x.corrected?`<div class="cc-sub">Data corretta da livello carburante${x.correction?` · ${dec(x.correction.before,1)}% → ${dec(x.correction.after,1)}% (+${dec(x.correction.rise,1)}%)`:""}</div><div class="cc-sub">FillUp Geotab: ${esc(dtLocal(x.originalDate))}</div>`:""}</td><td>${sup}</td><td>${esc(x.fuel||"—")}</td><td class="cc-num">${price}</td><td>${esc(x.source||"—")}</td><td class="cc-num">${dec(x.liters||0,2)} L</td><td class="cc-num"><b>${cost}</b></td>`;tb.appendChild(tr);
      }
      if(!items.length)tb.innerHTML='<tr><td colspan="7" class="cc-muted">Nessun rifornimento nel periodo selezionato.</td></tr>';
      $("n").textContent=items.length;$("liters").textContent=dec(tl,2)+" L";$("total").textContent=money(tc);$("avg").textContent=vl>0?dec(tc/vl,3)+" €/L":"—";
