@@ -116,22 +116,49 @@
      let d=new Date(dateValue);
      if(!deviceId||isNaN(d))return null;
      try{
+      // Finestra più ampia: il salto Fuel Level può essere registrato pochi minuti
+      // prima/dopo la posizione effettiva alla pompa.
       let rows=await get("LogRecord",{
        deviceSearch:{id:deviceId},
-       fromDate:new Date(d.getTime()-60*60000).toISOString(),
-       toDate:new Date(d.getTime()+60*60000).toISOString()
+       fromDate:new Date(d.getTime()-45*60000).toISOString(),
+       toDate:new Date(d.getTime()+45*60000).toISOString()
       },50000);
-      let best=null;
+
+      let candidates=[];
       for(const r of rows||[]){
-       let rd=new Date(r.dateTime),lat=Number(r.latitude),lon=Number(r.longitude);
+       let rd=new Date(r.dateTime),lat=Number(r.latitude),lon=Number(r.longitude),speed=Number(r.speed);
        if(isNaN(rd)||!Number.isFinite(lat)||!Number.isFinite(lon))continue;
-       let delta=Math.abs(rd-d);
-       if(!best||delta<best.delta)best={date:r.dateTime,lat,lon,delta,speed:r.speed};
+       candidates.push({
+        date:r.dateTime,dt:rd,lat,lon,
+        speed:Number.isFinite(speed)?speed:null,
+        delta:Math.abs(rd-d)
+       });
       }
-      return best;
+      if(!candidates.length)return null;
+
+      // Prima prova tutti i punti GPS nella finestra e privilegia quelli fermi/lenti.
+      // nearestStation resta a 500 m: non allarghiamo artificialmente il raggio MIMIT.
+      let tested=[];
+      for(const c of candidates){
+       if(c.delta>45*60000)continue;
+       let station=await nearestStation(c.lat,c.lon);
+       if(station){
+        let stopped=c.speed===null||c.speed<=5;
+        tested.push({...c,station,score:c.delta+(stopped?0:20*60000)});
+       }
+      }
+      if(tested.length){
+       tested.sort((x,y)=>x.score-y.score||x.station.distance-y.station.distance);
+       let best=tested[0];
+       return {...best,foundStation:true};
+      }
+
+      // Se nessun punto della finestra trova MIMIT, restituiamo comunque
+      // il GPS temporalmente più vicino per la diagnostica.
+      candidates.sort((x,y)=>x.delta-y.delta);
+      return {...candidates[0],foundStation:false};
      }catch(e){return {error:e&&e.message?e.message:String(e)}}
     }
-
     async function enrichFuelDiagnostic(f,deviceId){
      let d=await fuelDiagnosticForFill(f,deviceId);
      if(d.events.length){
@@ -143,19 +170,69 @@
       d.chosen=chosen;
       d.gps=await gpsDiagnostic(deviceId,chosen.date);
       if(d.gps&&!d.gps.error){
-       d.station=await nearestStation(d.gps.lat,d.gps.lon);
+       d.station=d.gps.station||await nearestStation(d.gps.lat,d.gps.lon);
       }
      }
      return d;
     }
 
-    async function processFill(f,vehicleFuel,deviceId){
-     let coords=fillCoords(f),liters=litersOf(f),date=f.dateTime||f.date||f.timestamp,dateKey=isoNoZone(date),fuel=normalizeFuel(f.productType)||vehicleFuel,out={date,liters,fuel,coords};
+    async function processFill(f,vehicleFuel,deviceId,fuelDiag){
+     let liters=litersOf(f);
+     let originalDate=f.dateTime||f.date||f.timestamp;
+     let originalCoords=fillCoords(f);
+     let fuel=normalizeFuel(f.productType)||vehicleFuel;
+
+     // Default: dati originali FillUp.
+     let date=originalDate,coords=originalCoords,station=null,corrected=false;
+
+     // Se il Profilo dati del motore ha trovato un aumento reale e abbiamo un GPS,
+     // usiamo QUEL momento/posizione per identificare il distributore.
+     // I litri restano sempre quelli del FillUp Geotab.
+     if(fuelDiag&&fuelDiag.chosen&&fuelDiag.gps&&!fuelDiag.gps.error){
+      date=fuelDiag.chosen.date;
+      coords=[fuelDiag.gps.lat,fuelDiag.gps.lon];
+      station=fuelDiag.station||fuelDiag.gps.station||null;
+      corrected=true;
+     }
+
+     let out={
+      date,originalDate,liters,fuel,coords,originalCoords,
+      corrected,fuelDiag
+     };
+
      if(!coords){out.error="Coordinate non disponibili";return out}
-     let ns=await nearestStation(coords[0],coords[1]);if(!ns){out.error="Impianto MIMIT non identificato entro "+MAX_STATION_METERS+" m";return out}
-     out.station=ns;out.supplier=supplier(ns);if(!fuel){out.error="Tipo carburante non riconosciuto";return out}
-     let hp=await historicalPrice(Number(ns.raw[0]),fuel,dateKey);if(!hp){out.error="Prezzo storico non disponibile";return out}
-     out.price=hp;out.source=hp.source||"MIMIT";out.cost=liters*hp.price;out.verified=true;return out;
+
+     // Se la scansione GPS non ha già trovato la stazione, prova sul punto scelto.
+     if(!station)station=await nearestStation(coords[0],coords[1]);
+
+     // Sicurezza: se la correlazione Fuel Level non trova alcun MIMIT, prova anche
+     // la posizione originale. Non perdiamo quindi rifornimenti già corretti.
+     if(!station&&corrected&&originalCoords){
+      let originalStation=await nearestStation(originalCoords[0],originalCoords[1]);
+      if(originalStation){
+       station=originalStation;
+       date=originalDate;
+       coords=originalCoords;
+       out.corrected=false;
+       out.date=date;
+       out.coords=coords;
+      }
+     }
+
+     if(!station){out.error="Impianto MIMIT non identificato entro "+MAX_STATION_METERS+" m";return out}
+
+     out.station=station;
+     out.supplier=supplier(station);
+     if(!fuel){out.error="Tipo carburante non riconosciuto";return out}
+
+     let hp=await historicalPrice(Number(station.raw[0]),fuel,isoNoZone(date));
+     if(!hp){out.error="Prezzo storico non disponibile";return out}
+
+     out.price=hp;
+     out.source=hp.source||"MIMIT";
+     out.cost=liters*hp.price;
+     out.verified=true;
+     return out;
     }
     function render(items){
      let tb=$("rows");tb.innerHTML="";let tl=0,tc=0,vl=0;
@@ -170,7 +247,8 @@
        let eventText=(d.events||[]).length?(d.events||[]).slice(0,5).map(e=>`${dtLocal(e.date)}: ${dec(e.before,1)}% → ${dec(e.after,1)}% (+${dec(e.rise,1)}%)`).join(" | "):"nessun aumento ≥ 5%";
        let gps=d.gps&&!d.gps.error?`${dec(d.gps.lat,6)}, ${dec(d.gps.lon,6)} @ ${dtLocal(d.gps.date)}`:(d.gps&&d.gps.error?d.gps.error:"—");
        let station=d.station?`${supplier(d.station).gestore||supplier(d.station).nome||"Impianto MIMIT"} · ${dec(d.station.distance,1)} m`:"—";
-       dr.innerHTML=`<td colspan="7" style="background:#fff8dc;padding:8px 10px;font-size:12px;line-height:1.55"><b>DIAGNOSTICA LIVELLO CARBURANTE</b> · campioni: ${d.rawCount||0}<br><b>Primi campioni:</b> ${esc(samplePreview||"nessuno")}<br><b>Aumenti:</b> ${esc(eventText)}<br><b>Evento scelto:</b> ${d.chosen?esc(dtLocal(d.chosen.date)):"—"} · <b>GPS:</b> ${esc(gps)} · <b>MIMIT:</b> ${esc(station)}${d.message?`<br><b>Messaggio:</b> ${esc(d.message)}`:""}</td>`;
+       let applied=x.corrected?"SÌ":"NO";
+       dr.innerHTML=`<td colspan="7" style="background:#fff8dc;padding:8px 10px;font-size:12px;line-height:1.55"><b>DIAGNOSTICA LIVELLO CARBURANTE</b> · campioni: ${d.rawCount||0}<br><b>Primi campioni:</b> ${esc(samplePreview||"nessuno")}<br><b>Aumenti:</b> ${esc(eventText)}<br><b>Evento scelto:</b> ${d.chosen?esc(dtLocal(d.chosen.date)):"—"} · <b>GPS:</b> ${esc(gps)} · <b>MIMIT:</b> ${esc(station)} · <b>Correzione applicata:</b> ${applied}${d.message?`<br><b>Messaggio:</b> ${esc(d.message)}`:""}</td>`;
        tb.appendChild(dr);
       }
      }
@@ -389,12 +467,13 @@
       fills=(fills||[]).sort((a,b)=>new Date(b.dateTime||b.date)-new Date(a.dateTime||a.date));
       let v=vehicles.find(x=>x.id===vid)||{},vf=await fuelForVehicle(v),out=[];
       for(let i=0;i<fills.length;i++){
-       $("status").textContent=`Analisi rifornimento ${i+1} di ${fills.length}: lettura Profilo dati del motore…`;
+       $("status").textContent=`Analisi rifornimento ${i+1} di ${fills.length}: livello carburante → GPS → MIMIT…`;
+       let fuelDiag;
+       try{fuelDiag=await enrichFuelDiagnostic(fills[i],vid)}
+       catch(e){fuelDiag={ok:false,rawCount:0,samples:[],events:[],message:"Errore diagnostica: "+e.message}}
        let item;
-       try{item=await processFill(fills[i],vf,vid)}
-       catch(e){item={date:fills[i].dateTime||fills[i].date,liters:litersOf(fills[i]),fuel:vf,error:e.message}}
-       try{item.fuelDiag=await enrichFuelDiagnostic(fills[i],vid)}
-       catch(e){item.fuelDiag={ok:false,rawCount:0,samples:[],events:[],message:"Errore diagnostica: "+e.message}}
+       try{item=await processFill(fills[i],vf,vid,fuelDiag)}
+       catch(e){item={date:fills[i].dateTime||fills[i].date,originalDate:fills[i].dateTime||fills[i].date,liters:litersOf(fills[i]),fuel:vf,fuelDiag,error:e.message}}
        out.push(item);
       }
       lastItems=out;lastVehicle=v;render(out);exportEnabled(out.length>0);$("status").className="status ok";$("status").textContent=`Completato: ${fills.length} rifornimenti analizzati dal ${from.toLocaleDateString("it-IT")} al ${to.toLocaleDateString("it-IT")}.`;
