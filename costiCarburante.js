@@ -69,124 +69,143 @@
     function supplier(s){let r=s.raw,gestore=r[3]||"",bandiera=r[4]||"",nome=r[6]||"";return {gestore,bandiera,nome,address:[r[7],r[8],r[9]].filter(Boolean).join(" — ")}}
     async function fuelForVehicle(v){let f=normalizeFuel(v.fuelType||v.propulsionType||v.powertrainType);if(f)return f;let groups=(v.groups||[]).map(g=>String(g.id||g.name||"")).join(" ");return normalizeFuel(groups)}
 
+
     const FUEL_LEVEL_DIAGNOSTIC_ID="DiagnosticFuelLevelId";
-    const FUEL_LEVEL_MIN_RISE=5;
-    const FUEL_LEVEL_LOOKBACK_HOURS=6;
-    const FUEL_LEVEL_LOOKAHEAD_HOURS=42;
-    const FUEL_LEVEL_MAX_SAMPLE_GAP_HOURS=24;
-    const LOG_POSITION_WINDOW_MINUTES=120;
+    const FUEL_LEVEL_MIN_RISE=20;              // rifornimento netto: almeno +20 punti %
+    const FUEL_LEVEL_LOOKAHEAD_HOURS=36;       // cerca solo dopo il FillUp Geotab
+    const FUEL_LEVEL_MAX_SAMPLE_GAP_HOURS=12;  // evita confronti troppo lontani
+    const FUEL_LEVEL_TARGET_HIGH=80;            // preferisce salti che arrivano verso serbatoio pieno
+    const LOG_POSITION_WINDOW_MINUTES=90;
 
-    async function readFuelLevelRows(deviceId,from,to){
-     let base={deviceSearch:{id:deviceId},fromDate:from.toISOString(),toDate:to.toISOString()};
-     let rows=await get("StatusData",{...base,diagnosticSearch:{id:FUEL_LEVEL_DIAGNOSTIC_ID}},50000);
-     // Geotab raccomanda un fallback limitato quando il filtro KnownId non restituisce righe.
-     if(!rows||!rows.length){
-      let all=await get("StatusData",base,50000);
-      rows=(all||[]).filter(r=>r.diagnostic&&r.diagnostic.id===FUEL_LEVEL_DIAGNOSTIC_ID);
-     }
-     return (rows||[])
-      .map(r=>({date:new Date(r.dateTime),level:Number(r.data)}))
-      .filter(r=>!isNaN(r.date)&&Number.isFinite(r.level)&&r.level>=0&&r.level<=100)
-      .sort((a,b)=>a.date-b.date);
-    }
-
-    async function fuelLevelCorrection(deviceId,fillDate){
-     let base=new Date(fillDate);if(!deviceId||isNaN(base))return null;
-     let from=new Date(base.getTime()-FUEL_LEVEL_LOOKBACK_HOURS*3600000);
+    async function fuelLevelRowsAfter(deviceId,fillDate){
+     let base=new Date(fillDate);
+     if(!deviceId||isNaN(base))return [];
      let to=new Date(base.getTime()+FUEL_LEVEL_LOOKAHEAD_HOURS*3600000);
      try{
-      let rows=await readFuelLevelRows(deviceId,from,to);
-      if(rows.length<2)return null;
+      let rows=await get("StatusData",{
+       deviceSearch:{id:deviceId},
+       diagnosticSearch:{id:FUEL_LEVEL_DIAGNOSTIC_ID},
+       fromDate:base.toISOString(),
+       toDate:to.toISOString()
+      },50000);
+      return (rows||[])
+       // Gli estremi interpolati possono non avere id: non li usiamo come prova del rifornimento.
+       .filter(r=>r.id)
+       .map(r=>({date:new Date(r.dateTime),level:Number(r.data)}))
+       .filter(r=>!isNaN(r.date)&&Number.isFinite(r.level)&&r.level>=0&&r.level<=100)
+       .sort((a,b)=>a.date-b.date);
+     }catch(e){
+      console.warn("Lettura livello carburante non disponibile:",e);
+      return [];
+     }
+    }
 
-      let candidates=[];
-      for(let i=1;i<rows.length;i++){
-       let prev=rows[i-1],cur=rows[i];
-       let rise=cur.level-prev.level;
-       let gapHours=(cur.date-prev.date)/3600000;
-       if(rise<FUEL_LEVEL_MIN_RISE||gapHours>FUEL_LEVEL_MAX_SAMPLE_GAP_HOURS)continue;
-       // Per correggere un FillUp anticipato ci interessa soprattutto il salto successivo.
-       if(cur.date<base)continue;
-       candidates.push({date:cur.date,before:prev.level,after:cur.level,rise,gapHours});
-      }
-      if(!candidates.length)return null;
+    async function findNextRealRefuel(deviceId,fillDate){
+     let rows=await fuelLevelRowsAfter(deviceId,fillDate);
+     if(rows.length<2)return null;
 
-      // Preferisce il primo vero aumento dopo il FillUp, non il salto più grande dell'intera finestra.
-      candidates.sort((a,b)=>a.date-b.date);
-      let best=candidates[0];
+     let candidates=[];
+     for(let i=1;i<rows.length;i++){
+      let prev=rows[i-1],cur=rows[i];
+      let rise=cur.level-prev.level;
+      let gapHours=(cur.date-prev.date)/3600000;
+      if(rise<FUEL_LEVEL_MIN_RISE||gapHours>FUEL_LEVEL_MAX_SAMPLE_GAP_HOURS)continue;
+      candidates.push({
+       date:cur.date,
+       before:prev.level,
+       after:cur.level,
+       rise,
+       gapHours,
+       high:cur.level>=FUEL_LEVEL_TARGET_HIGH
+      });
+     }
+     if(!candidates.length)return null;
 
+     // Primo salto netto successivo; a parità temporale privilegia quello che porta verso il pieno.
+     candidates.sort((a,b)=>(a.date-b.date)||((b.high?1:0)-(a.high?1:0))||(b.rise-a.rise));
+     return candidates[0];
+    }
+
+    async function gpsNearMoment(deviceId,date){
+     let from=new Date(date.getTime()-LOG_POSITION_WINDOW_MINUTES*60000);
+     let to=new Date(date.getTime()+LOG_POSITION_WINDOW_MINUTES*60000);
+     try{
       let logs=await get("LogRecord",{
        deviceSearch:{id:deviceId},
-       fromDate:new Date(best.date.getTime()-LOG_POSITION_WINDOW_MINUTES*60000).toISOString(),
-       toDate:new Date(best.date.getTime()+LOG_POSITION_WINDOW_MINUTES*60000).toISOString()
+       fromDate:from.toISOString(),
+       toDate:to.toISOString()
       },50000);
-
       let nearest=null;
       for(const r of logs||[]){
        let d=new Date(r.dateTime),lat=Number(r.latitude),lon=Number(r.longitude);
        if(isNaN(d)||!Number.isFinite(lat)||!Number.isFinite(lon))continue;
-       let delta=Math.abs(d-best.date);
-       if(!nearest||delta<nearest.delta)nearest={lat,lon,delta,date:d};
+       let delta=Math.abs(d-date);
+       if(!nearest||delta<nearest.delta)nearest={lat,lon,date:d,delta};
       }
-
-      return {
-       date:best.date,
-       before:best.before,
-       after:best.after,
-       rise:best.rise,
-       gapHours:best.gapHours,
-       coords:nearest?[nearest.lat,nearest.lon]:null
-      };
+      return nearest;
      }catch(e){
-      console.warn("Controllo livello carburante non disponibile:",e);
+      console.warn("Posizione GPS del rifornimento non disponibile:",e);
       return null;
      }
     }
 
-    async function tryStationAtOriginalFill(f){
-     let coords=fillCoords(f);
-     if(!coords)return {coords:null,station:null};
-     return {coords,station:await nearestStation(coords[0],coords[1])};
-    }
-
-    async function resolveFillMoment(f,deviceId){
+    async function correctedUnmatchedFill(f,deviceId){
      let originalDate=f.dateTime||f.date||f.timestamp;
-     let original=await tryStationAtOriginalFill(f);
+     let event=await findNextRealRefuel(deviceId,originalDate);
+     if(!event)return null;
 
-     // Se Geotab ha già collocato il FillUp entro 500 m da un impianto MIMIT,
-     // non alteriamo data e posizione.
-     if(original.station){
-      return {date:originalDate,coords:original.coords,station:original.station,corrected:false,correction:null};
-     }
+     let gps=await gpsNearMoment(deviceId,event.date);
+     if(!gps)return null;
 
-     // Solo se la stazione non viene trovata, controlliamo il livello carburante
-     // fino al giorno successivo e usiamo il momento del primo aumento reale.
-     let c=await fuelLevelCorrection(deviceId,originalDate);
-     if(!c||!c.coords){
-      return {date:originalDate,coords:original.coords,station:null,corrected:false,correction:null};
-     }
+     let station=await nearestStation(gps.lat,gps.lon);
+     if(!station)return null; // se anche la posizione corretta non trova MIMIT, lasciamo il FillUp originale
 
-     let correctedStation=await nearestStation(c.coords[0],c.coords[1]);
      return {
-      date:c.date.toISOString(),
-      coords:c.coords,
-      station:correctedStation,
-      corrected:true,
-      correction:c
+      date:event.date.toISOString(),
+      coords:[gps.lat,gps.lon],
+      station,
+      correction:event
      };
     }
 
     async function processFill(f,vehicleFuel,deviceId){
-     let liters=litersOf(f),originalDate=f.dateTime||f.date||f.timestamp,resolved=await resolveFillMoment(f,deviceId);
-     let coords=resolved.coords,date=resolved.date,dateKey=isoNoZone(date),fuel=normalizeFuel(f.productType)||vehicleFuel;
-     let out={date,originalDate,liters,fuel,coords,corrected:resolved.corrected,correction:resolved.correction};
-     if(!coords){out.error="Coordinate non disponibili";return out}
-     let ns=resolved.station;
+     let liters=litersOf(f),originalDate=f.dateTime||f.date||f.timestamp;
+     let originalCoords=fillCoords(f),fuel=normalizeFuel(f.productType)||vehicleFuel;
+     let out={date:originalDate,originalDate,liters,fuel,coords:originalCoords,corrected:false,correction:null};
+
+     if(!originalCoords){out.error="Coordinate non disponibili";return out}
+
+     // 1) Comportamento originale: prima prova SEMPRE il FillUp Geotab senza modificarlo.
+     let ns=await nearestStation(originalCoords[0],originalCoords[1]);
+
+     // 2) Solo se l'impianto non esiste entro 500 m, usa Fuel level (%) come fallback.
+     if(!ns){
+      let corrected=await correctedUnmatchedFill(f,deviceId);
+      if(corrected){
+       out.date=corrected.date;
+       out.coords=corrected.coords;
+       out.corrected=true;
+       out.correction=corrected.correction;
+       ns=corrected.station;
+      }
+     }
+
      if(!ns){out.error="Impianto MIMIT non identificato entro "+MAX_STATION_METERS+" m";return out}
-     out.station=ns;out.supplier=supplier(ns);
+
+     out.station=ns;
+     out.supplier=supplier(ns);
      if(!fuel){out.error="Tipo carburante non riconosciuto";return out}
+
+     // Se il fallback ha corretto la data, anche il prezzo storico viene cercato nella data corretta.
+     let dateKey=isoNoZone(out.date);
      let hp=await historicalPrice(Number(ns.raw[0]),fuel,dateKey);
      if(!hp){out.error="Prezzo storico non disponibile";return out}
-     out.price=hp;out.source=hp.source||"MIMIT";out.cost=liters*hp.price;out.verified=true;return out;
+
+     out.price=hp;
+     out.source=hp.source||"MIMIT";
+     out.cost=liters*hp.price;
+     out.verified=true;
+     return out;
     }
     function render(items){
      let tb=$("rows");tb.innerHTML="";let tl=0,tc=0,vl=0;
