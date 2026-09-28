@@ -28,12 +28,10 @@
 <thead><tr><th>Data rifornimento</th><th>Distributore rilevato</th><th>Carburante</th><th>Prezzo €/L</th><th>Fonte</th><th>Litri</th><th>Costo totale</th></tr></thead>
 <tbody id="rows"><tr><td colspan="7" class="cc-muted">Seleziona un veicolo e il periodo.</td></tr></tbody>
 </table></div></div></div></div><script>
-
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v27 caricato. Attesa inizializzazione MyGeotab…";
 })();
-
 (function(){
             "use strict";
             const DATA_BASE="https://hattorikenzo.github.io/geotab-carburanti/data";
@@ -63,8 +61,25 @@
             function normalizeFuel(v){let s=String(v||"").toLowerCase();if(/diesel|gasolio/.test(s))return "Gasolio";if(/sp95|gasoline|petrol|benzina/.test(s))return "Benzina";if(/lpg|gpl/.test(s))return "GPL";if(/cng|metano/.test(s))return "Metano";return ""}
             function fillCoords(f){let lat=f.latitude,lon=f.longitude;if(f.location){if(lat==null)lat=f.location.y;if(lon==null)lon=f.location.x}lat=Number(lat);lon=Number(lon);return Number.isFinite(lat)&&Number.isFinite(lon)?[lat,lon]:null}
             function litersOf(f){for(const k of ["volume","liters","fuelVolume","totalFuel"]){let n=Number(f[k]);if(Number.isFinite(n)&&n>0)return n}return 0}
-            async function fetchJson(url){let r=await fetch(url,{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status+" "+url);return r.json()}
-            async function fetchGzip(url){let r=await fetch(url,{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status+" "+url);if(!("DecompressionStream" in window))throw new Error("Browser senza supporto gzip DecompressionStream");let b=await r.blob(),ds=new DecompressionStream("gzip");return JSON.parse(await new Response(b.stream().pipeThrough(ds)).text())}
+            const jsonCache=new Map(), gzipCache=new Map();
+            async function fetchJson(url){
+             if(jsonCache.has(url))return jsonCache.get(url);
+             let p=fetch(url,{cache:"force-cache"}).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status+" "+url);return r.json()});
+             jsonCache.set(url,p);
+             try{return await p}catch(e){jsonCache.delete(url);throw e}
+            }
+            async function fetchGzip(url){
+             if(gzipCache.has(url))return gzipCache.get(url);
+             let p=(async()=>{
+              let r=await fetch(url,{cache:"force-cache"});
+              if(!r.ok)throw new Error("HTTP "+r.status+" "+url);
+              if(!("DecompressionStream" in window))throw new Error("Browser senza supporto gzip DecompressionStream");
+              let b=await r.blob(),ds=new DecompressionStream("gzip");
+              return JSON.parse(await new Response(b.stream().pipeThrough(ds)).text());
+             })();
+             gzipCache.set(url,p);
+             try{return await p}catch(e){gzipCache.delete(url);throw e}
+            }
             function quarterOf(v){let d=new Date(v);if(isNaN(d))return "";let y=d.getFullYear(),q=Math.floor(d.getMonth()/3)+1;return `${y}-Q${q}`}
             async function loadCoverage(){
              try{
@@ -188,15 +203,14 @@
              return stored.length?stored:(rows||[]);
             }
 
-            function findVolumeRise(samples,fillLiters){
+            function findVolumeRise(samples,fillLiters,usedRiseDates){
              let s=realSamples(samples),best=null;
              for(let i=1;i<s.length;i++){
               let a=s[i-1],b=s[i],rise=b.data-a.data;
               if(rise<=0)continue;
-              // Soglia minima anti-rumore. Il volume FillUp resta comunque l'unica
-              // quantità usata per costo e report.
               let threshold=Math.max(3,Math.min(10,(Number(fillLiters)||0)*0.20));
               if(rise<threshold)continue;
+              if(usedRiseDates&&usedRiseDates.has(String(b.date)))continue;
               let candidate={date:b.date,before:a.data,after:b.data,rise};
               if(!best||new Date(candidate.date)<new Date(best.date))best=candidate;
              }
@@ -204,6 +218,7 @@
             }
 
             function ignitionIsOn(v){return Number(v)>0}
+
 
             async function firstGpsAfter(deviceId,dateValue,minutes=8){
          let d=new Date(dateValue);
@@ -223,7 +238,22 @@
          }catch(e){return {error:e&&e.message?e.message:String(e)}}
         }
 
-        async function recoveryFromNextIgnition(f,deviceId){
+            async function prepareRecoveryContext(fills,deviceId){
+             if(!fills||!fills.length||!deviceId)return null;
+             let dates=fills.map(f=>new Date(f.dateTime||f.date||f.timestamp)).filter(d=>!isNaN(d));
+             if(!dates.length)return null;
+             let from=new Date(Math.min(...dates.map(d=>d.getTime())));
+             let to=new Date(Math.max(...dates.map(d=>d.getTime()))+RECOVERY_AFTER_HOURS*3600000);
+             let volumeId=await resolveFuelVolumeDiagnostic();
+             if(!volumeId)return {volumeId:"",volumeRows:[],ignitionRows:[],from,to};
+             let [volumeRows,ignitionRows]=await Promise.all([
+              statusWindow(deviceId,volumeId,from,to),
+              statusWindow(deviceId,IGNITION_DIAG_ID,from,to).catch(()=>[])
+             ]);
+             return {volumeId,volumeRows,ignitionRows,from,to};
+            }
+
+        async function recoveryFromNextIgnition(f,deviceId,ctx,usedRiseDates){
              let originalDate=f.dateTime||f.date||f.timestamp,base=new Date(originalDate);
              let result={
               used:false,originalDate,volumeDiagnosticId:"",volumeSamples:[],
@@ -275,6 +305,7 @@
                 result.gps=gps;
                 result.station=station;
                 result.used=true;
+                if(result.volumeRise&&usedRiseDates)usedRiseDates.add(String(result.volumeRise.date));
                 return result;
                }
               }
@@ -288,19 +319,20 @@
              }
             }
 
-            async function processFill(f,vehicleFuel,deviceId){
+            async function processFill(f,vehicleFuel,deviceId,options){
              let originalCoords=fillCoords(f),liters=litersOf(f),originalDate=f.dateTime||f.date||f.timestamp;
              let fuel=normalizeFuel(f.productType)||vehicleFuel;
              let out={date:originalDate,originalDate,liters,fuel,coords:originalCoords,recovery:null};
 
              // REGOLA 1: prima usiamo normalmente posizione e data del FillUp.
-             let ns=null;
-             if(originalCoords)ns=await nearestStation(originalCoords[0],originalCoords[1]);
+             options=options||{};
+             let ns=Object.prototype.hasOwnProperty.call(options,"originalStation")?options.originalStation:null;
+             if(!Object.prototype.hasOwnProperty.call(options,"originalStation")&&originalCoords)ns=await nearestStation(originalCoords[0],originalCoords[1]);
 
              // REGOLA 2: solo se il FillUp NON identifica una stazione, passiamo a:
              // Fuel Level Volume (L) -> aumento -> prossimo Ignition ON -> primo GPS -> MIMIT.
              if(!ns){
-              let recovery=await recoveryFromNextIgnition(f,deviceId);
+              let recovery=await recoveryFromNextIgnition(f,deviceId,options.recoveryContext,options.usedRiseDates);
               out.recovery=recovery;
               if(recovery.used&&recovery.station&&recovery.gps){
                ns=recovery.station;
@@ -548,26 +580,57 @@
 
             async function loadHistory(){
              let vid=$("vehicle").value,fromValue=$("dateFrom").value,toValue=$("dateTo").value;
-             if(!vid){$("cc-status").className="cc-status err";$("cc-status").textContent="Seleziona un veicolo.";return}
-             if(!fromValue||!toValue){$("cc-status").className="cc-status err";$("cc-status").textContent="Seleziona la data iniziale e la data finale.";return}
-             if(fromValue>toValue){$("cc-status").className="cc-status err";$("cc-status").textContent="La data iniziale non può essere successiva alla data finale.";return}
+             if(!vid){$("status").className="cc-status err";$("status").textContent="Seleziona un veicolo.";return}
+             if(!fromValue||!toValue){$("status").className="cc-status err";$("status").textContent="Seleziona la data iniziale e la data finale.";return}
+             if(fromValue>toValue){$("status").className="cc-status err";$("status").textContent="La data iniziale non può essere successiva alla data finale.";return}
              let from=new Date(`${fromValue}T00:00:00`),to=new Date(`${toValue}T23:59:59.999`);
-             exportEnabled(false);lastItems=[];$("load").disabled=true;$("cc-status").className="cc-status";$("cc-status").textContent="Caricamento rifornimenti…";
+             exportEnabled(false);lastItems=[];$("load").disabled=true;$("status").className="cc-status";$("status").textContent="Caricamento rifornimenti…";
              try{
               let fills=await get("FillUp",{deviceSearch:{id:vid},fromDate:from.toISOString(),toDate:to.toISOString()},50000);
-              fills=(fills||[]).sort((a,b)=>new Date(b.dateTime||b.date)-new Date(a.dateTime||a.date));
-              let v=vehicles.find(x=>x.id===vid)||{},vf=await fuelForVehicle(v),out=[];
-              for(let i=0;i<fills.length;i++){
-               $("cc-status").textContent=`Analisi rifornimento ${i+1} di ${fills.length}: posizione FillUp / recupero rapido da aumento carburante…`;
-               let item;
-               try{item=await processFill(fills[i],vf,vid)}
-               catch(e){item={date:fills[i].dateTime||fills[i].date,liters:litersOf(fills[i]),fuel:vf,error:e.message}}
-               out.push(item);
+              fills=(fills||[]).sort((a,b)=>new Date(a.dateTime||a.date)-new Date(b.dateTime||b.date));
+              let v=vehicles.find(x=>x.id===vid)||{},vf=await fuelForVehicle(v);
+
+              $("status").textContent=`Ricerca rapida distributori per ${fills.length} rifornimenti…`;
+              // Tutte le ricerche MIMIT sulle coordinate FillUp partono insieme.
+              let directStations=await Promise.all(fills.map(f=>{
+               let c=fillCoords(f);
+               return c?nearestStation(c[0],c[1]).catch(()=>null):Promise.resolve(null);
+              }));
+
+              let missingIndexes=[];
+              for(let i=0;i<fills.length;i++)if(!directStations[i])missingIndexes.push(i);
+
+              let recoveryContext=null,usedRiseDates=new Set();
+              if(missingIndexes.length){
+               $("status").textContent=`${fills.length-missingIndexes.length} distributori immediati. Caricamento unico dati motore per ${missingIndexes.length} da recuperare…`;
+               recoveryContext=await prepareRecoveryContext(missingIndexes.map(i=>fills[i]),vid);
               }
-              lastItems=out;lastVehicle=v;render(out);exportEnabled(out.length>0);$("cc-status").className="cc-status ok";$("cc-status").textContent=`Completato: ${fills.length} rifornimenti analizzati dal ${from.toLocaleDateString("it-IT")} al ${to.toLocaleDateString("it-IT")}.`;
-             }catch(e){$("cc-status").className="cc-status err";$("cc-status").textContent="Errore: "+e.message}
-             finally{$("load").disabled=false}
+
+              // Associazione cronologica 1:1 dei soli FillUp mancanti.
+              let out=new Array(fills.length);
+              for(let i=0;i<fills.length;i++){
+               $("status").textContent=`Analisi ${i+1}/${fills.length}…`;
+               try{
+                out[i]=await processFill(fills[i],vf,vid,{
+                 originalStation:directStations[i],
+                 recoveryContext,
+                 usedRiseDates
+                });
+               }catch(e){
+                out[i]={date:fills[i].dateTime||fills[i].date,liters:litersOf(fills[i]),fuel:vf,error:e.message};
+               }
+              }
+
+              // La tabella resta dal più recente al più vecchio.
+              out.sort((a,b)=>new Date(b.originalDate||b.date)-new Date(a.originalDate||a.date));
+              lastItems=out;lastVehicle=v;render(out);exportEnabled(out.length>0);
+              $("status").className="cc-status ok";
+              $("status").textContent=`Completato: ${fills.length} rifornimenti. ${fills.length-missingIndexes.length} identificati direttamente, ${missingIndexes.length} analizzati con dati motore caricati una sola volta.`;
+             }catch(e){
+              $("status").className="cc-status err";$("status").textContent="Errore: "+(e&&e.message?e.message:String(e));
+             }finally{$("load").disabled=false}
             }
+
             async function init(myApi){
              api=myApi;setDefaultDates();$("cc-status").textContent="MyGeotab collegato. Caricamento veicoli…";
              try{
