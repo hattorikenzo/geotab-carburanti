@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v32 caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v33 caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -340,38 +340,82 @@
              }
             }
 
+            function extremaLitersFromFillUp(f){
+             let e=f&&f.tankLevelExtrema;
+             if(!e)return null;
+
+             // JSON serialization can expose these names with either casing.
+             let minp=e.minimaPoint||e.MinimaPoint||e.minimumPoint||e.MinimumPoint;
+             let maxp=e.maximaPoint||e.MaximaPoint||e.maximumPoint||e.MaximumPoint;
+             if(!minp||!maxp)return null;
+
+             let low=Number(minp.data),high=Number(maxp.data);
+             if(!Number.isFinite(low)||!Number.isFinite(high)||high<=low)return null;
+
+             // Prefer extrema whose source is explicitly derived from fuel-level
+             // volume ("EstimateFuelUnits"). If source is omitted by the API,
+             // the values are still accepted because they are the FillUp extrema.
+             let source=String(maxp.source||minp.source||"");
+             return {
+              before:low,
+              after:high,
+              rise:high-low,
+              date:maxp.dateTime||maxp.DateTime||f.dateTime||f.date,
+              source
+             };
+            }
+
             async function processFill(f,vehicleFuel,deviceId){
              let originalCoords=fillCoords(f),originalDate=f.dateTime||f.date||f.timestamp;
              let fuel=normalizeFuel(f.productType)||vehicleFuel;
              let out={date:originalDate,originalDate,liters:0,fuel,coords:originalCoords,recovery:null};
 
-             // I litri finali provengono SEMPRE dal Profilo dati motore:
-             // "Livello del carburante (Volume) (L)".
-             // Delta positivo LIVELLO CARBURANTE MISURE, poi correzione -23%.
-             let recovery=await recoveryFromNextIgnition(f,deviceId);
-             out.recovery=recovery;
+             // FONTE LITRI v33:
+             // 1) usa direttamente tankLevelExtrema del FillUp: minimo e massimo
+             //    derivati dai StatusData del livello carburante;
+             // 2) solo se gli extrema non sono disponibili, prova la ricerca
+             //    StatusData del profilo motore.
+             let extrema=extremaLitersFromFillUp(f);
+             let recovery=null;
+             let rise=null;
 
-             if(recovery.volumeRise && Number(recovery.volumeRise.rise)>0){
-              out.rawFuelVolumeDelta=Number(recovery.volumeRise.rise);
-              out.liters=Math.max(0,out.rawFuelVolumeDelta*FUEL_VOLUME_CORRECTION_FACTOR);
-              out.litersFromDelta=true;
-              out.date=recovery.volumeRise.date;
+             if(extrema && extrema.rise>0){
+              rise=extrema;
+              out.rawFuelVolumeDelta=extrema.rise;
+              out.date=extrema.date||originalDate;
              }else{
-              // Nessun fallback a FillUp.volume: evita di mostrare litri errati.
+              recovery=await recoveryFromNextIgnition(f,deviceId);
+              out.recovery=recovery;
+              if(recovery.volumeRise && Number(recovery.volumeRise.rise)>0){
+               rise=recovery.volumeRise;
+               out.rawFuelVolumeDelta=Number(recovery.volumeRise.rise);
+               out.date=recovery.volumeRise.date||originalDate;
+              }
+             }
+
+             // Correzione richiesta: sottrazione del 23%.
+             // Esempio 22,4474 - 9,0000 = 13,4474; × 0,77 = 10,3545 L.
+             if(rise && Number(rise.rise)>0){
+              out.liters=Math.max(0,Number(rise.rise)*FUEL_VOLUME_CORRECTION_FACTOR);
+              out.litersFromDelta=true;
+             }else{
               out.liters=0;
               out.litersUnavailable=true;
              }
 
-             // Per l'impianto manteniamo prima la posizione FillUp se identifica
-             // correttamente una stazione entro 500 m.
+             // Stazione: prima posizione FillUp entro 500 m.
              let ns=null;
              if(originalCoords)ns=await nearestStation(originalCoords[0],originalCoords[1]);
 
-             // Se non basta, usiamo la posizione ricostruita dal delta/ignition.
-             if(!ns && recovery.used && recovery.station && recovery.gps){
-              ns=recovery.station;
-              out.stationRecovered=true;
-              out.coords=[recovery.gps.lat,recovery.gps.lon];
+             // Recupero posizione solo quando necessario.
+             if(!ns){
+              if(!recovery)recovery=await recoveryFromNextIgnition(f,deviceId);
+              out.recovery=recovery;
+              if(recovery.used&&recovery.station&&recovery.gps){
+               ns=recovery.station;
+               out.stationRecovered=true;
+               out.coords=[recovery.gps.lat,recovery.gps.lon];
+              }
              }
 
              if(!ns){
