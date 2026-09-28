@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v35 caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v36 caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -61,6 +61,8 @@
             function isoNoZone(v){let d=new Date(v);if(isNaN(d))return String(v).slice(0,19);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,19)}
             function hav(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,a=Math.sin((lat2-lat1)*p/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin((lon2-lon1)*p/2)**2;return 2*R*Math.asin(Math.sqrt(a))}
             function normalizeFuel(v){let s=String(v||"").toLowerCase();if(/diesel|gasolio/.test(s))return "Gasolio";if(/sp95|gasoline|petrol|benzina/.test(s))return "Benzina";if(/lpg|gpl/.test(s))return "GPL";if(/cng|metano/.test(s))return "Metano";return ""}
+             // I veicoli HEV usano Benzina per la ricerca prezzo carburante.
+             if(/(^|[^a-z])hev([^a-z]|$)/i.test(String(v||"")))return "Benzina";
             function fillCoords(f){let lat=f.latitude,lon=f.longitude;if(f.location){if(lat==null)lat=f.location.y;if(lon==null)lon=f.location.x}lat=Number(lat);lon=Number(lon);return Number.isFinite(lat)&&Number.isFinite(lon)?[lat,lon]:null}
             function litersOf(f){for(const k of ["volume","liters","fuelVolume","totalFuel"]){let n=Number(f[k]);if(Number.isFinite(n)&&n>0)return n}return 0}
             const jsonCache=new Map(),gzipCache=new Map();
