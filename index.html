@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v30 caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v31 caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -201,6 +201,7 @@
 
             const REFUEL_STABLE_MINUTES=2;
             const REFUEL_STABLE_TOLERANCE_L=1.0;
+            const FUEL_VOLUME_CORRECTION_FACTOR=0.77; // -23%
 
             function findVolumeRise(samples,fillLiters){
              let s=realSamples(samples);
@@ -338,50 +339,58 @@
             }
 
             async function processFill(f,vehicleFuel,deviceId){
-             let originalCoords=fillCoords(f),liters=litersOf(f),originalDate=f.dateTime||f.date||f.timestamp;
+             let originalCoords=fillCoords(f),originalDate=f.dateTime||f.date||f.timestamp;
              let fuel=normalizeFuel(f.productType)||vehicleFuel;
-             let out={date:originalDate,originalDate,liters,fuel,coords:originalCoords,recovery:null};
+             let out={date:originalDate,originalDate,liters:0,fuel,coords:originalCoords,recovery:null};
 
-             // REGOLA 1: prima usiamo normalmente posizione e data del FillUp.
+             // I litri finali provengono SEMPRE dal Profilo dati motore:
+             // "Livello del carburante (Volume) (L)".
+             // Delta positivo stabile >= 2 minuti, poi correzione -23%.
+             let recovery=await recoveryFromNextIgnition(f,deviceId);
+             out.recovery=recovery;
+
+             if(recovery.volumeRise && Number(recovery.volumeRise.rise)>0){
+              out.rawFuelVolumeDelta=Number(recovery.volumeRise.rise);
+              out.liters=out.rawFuelVolumeDelta*FUEL_VOLUME_CORRECTION_FACTOR;
+              out.litersFromDelta=true;
+              out.date=recovery.volumeRise.date;
+             }else{
+              // Nessun fallback a FillUp.volume: evita di mostrare litri errati.
+              out.liters=0;
+              out.litersUnavailable=true;
+             }
+
+             // Per l'impianto manteniamo prima la posizione FillUp se identifica
+             // correttamente una stazione entro 500 m.
              let ns=null;
              if(originalCoords)ns=await nearestStation(originalCoords[0],originalCoords[1]);
 
-             // REGOLA 2: solo se il FillUp NON identifica una stazione, passiamo a:
-             // Fuel Level Volume (L) -> delta positivo stabile >= 2 min -> Ignition/GPS -> MIMIT.
-             if(!ns){
-              let recovery=await recoveryFromNextIgnition(f,deviceId);
-              out.recovery=recovery;
-              if(recovery.used&&recovery.station&&recovery.gps){
-               ns=recovery.station;
-               out.stationRecovered=true;
-               out.coords=[recovery.gps.lat,recovery.gps.lon];
-
-               // Il quantitativo effettivo viene preso dal delta positivo del
-               // Fuel Level Volume (L), già confermato stabile per almeno 2 minuti.
-               if(recovery.volumeRise && Number(recovery.volumeRise.rise)>0){
-                out.liters=Number(recovery.volumeRise.rise);
-                out.litersFromDelta=true;
-               }
-
-               // La data effettiva del rifornimento è quella del delta confermato.
-               out.date=recovery.volumeRise?recovery.volumeRise.date:(recovery.ignition?recovery.ignition.date:recovery.gps.date);
-              }
+             // Se non basta, usiamo la posizione ricostruita dal delta/ignition.
+             if(!ns && recovery.used && recovery.station && recovery.gps){
+              ns=recovery.station;
+              out.stationRecovered=true;
+              out.coords=[recovery.gps.lat,recovery.gps.lon];
              }
 
              if(!ns){
-              out.error=out.recovery&&out.recovery.message?out.recovery.message:"Impianto MIMIT non identificato entro "+MAX_STATION_METERS+" m";
+              out.error=recovery&&recovery.message?recovery.message:"Impianto MIMIT non identificato";
               return out;
              }
 
              out.station=ns;
              out.supplier=supplier(ns);
-             if(!fuel){out.error="Tipo carburante non riconosciuto";return out}
+             if(!fuel){out.error="Carburante non riconosciuto";return out}
 
-             let hp=await historicalPrice(Number(ns.raw[0]),fuel,isoNoZone(out.date));
-             if(!hp){out.error="Prezzo storico non disponibile";return out}
-             out.price=hp;out.source=hp.source||"MIMIT";out.cost=liters*hp.price;out.verified=true;
+             let hp=await historicalPrice(ns.raw[0],fuel,out.date);
+             if(!hp){out.error="Prezzo storico non trovato";return out}
+
+             out.price=hp;
+             out.verified=true;
+             out.cost=out.liters*hp.price;
+             out.source=hp.source;
              return out;
             }
+
             function render(items){
              let tb=$("rows");tb.innerHTML="";let tl=0,tc=0,vl=0;
              for(const x of items){
