@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v28 caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v29 caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -199,19 +199,57 @@
              return stored.length?stored:(rows||[]);
             }
 
+            const REFUEL_STABLE_MINUTES=2;
+            const REFUEL_STABLE_TOLERANCE_L=1.0;
+
             function findVolumeRise(samples,fillLiters){
-             let s=realSamples(samples),best=null;
+             let s=realSamples(samples);
              for(let i=1;i<s.length;i++){
               let a=s[i-1],b=s[i],rise=b.data-a.data;
               if(rise<=0)continue;
-              // Soglia minima anti-rumore. Il volume FillUp resta comunque l'unica
-              // quantità usata per costo e report.
+
+              // Anti-rumore: il salto deve essere compatibile con un rifornimento.
               let threshold=Math.max(3,Math.min(10,(Number(fillLiters)||0)*0.20));
               if(rise<threshold)continue;
-              let candidate={date:b.date,before:a.data,after:b.data,rise};
-              if(!best||new Date(candidate.date)<new Date(best.date))best=candidate;
+
+              // NUOVA REGOLA:
+              // il nuovo livello deve restare sostanzialmente stabile per almeno 2 minuti.
+              // Consideriamo stabile una variazione massima di 1 litro rispetto al valore
+              // raggiunto dopo il delta positivo.
+              let start=new Date(b.date);
+              if(isNaN(start))continue;
+              let targetEnd=new Date(start.getTime()+REFUEL_STABLE_MINUTES*60000);
+              let stableUntil=start,stableSamples=1,confirmed=false;
+
+              for(let j=i+1;j<s.length;j++){
+               let c=s[j],ct=new Date(c.date);
+               if(isNaN(ct))continue;
+
+               // Se il livello cambia oltre la tolleranza prima dei 2 minuti,
+               // il delta non viene considerato un rifornimento confermato.
+               if(Math.abs(c.data-b.data)>REFUEL_STABLE_TOLERANCE_L)break;
+
+               stableUntil=ct;
+               stableSamples++;
+               if(ct>=targetEnd){
+                confirmed=true;
+                break;
+               }
+              }
+
+              if(confirmed){
+               return {
+                date:b.date,
+                before:a.data,
+                after:b.data,
+                rise,
+                stableMinutes:(stableUntil-start)/60000,
+                stableUntil:stableUntil.toISOString(),
+                stableSamples
+               };
+              }
              }
-             return best;
+             return null;
             }
 
             function ignitionIsOn(v){return Number(v)>0}
@@ -291,7 +329,7 @@
               }
 
               if(result.volumeRise)result.message="Aumento volume trovato, ma nessun impianto MIMIT disponibile nella griglia dati attorno alla posizione rilevata.";
-              else result.message="Nessun aumento significativo del livello carburante (Volume) trovato nelle 48 ore successive.";
+              else result.message="Nessun delta positivo del volume carburante rimasto stabile per almeno 2 minuti trovato nelle 48 ore successive.";
               return result;
              }catch(e){
               result.message="Errore recupero rifornimento: "+(e&&e.message?e.message:String(e));
@@ -309,7 +347,7 @@
              if(originalCoords)ns=await nearestStation(originalCoords[0],originalCoords[1]);
 
              // REGOLA 2: solo se il FillUp NON identifica una stazione, passiamo a:
-             // Fuel Level Volume (L) -> aumento -> prossimo Ignition ON -> primo GPS -> MIMIT.
+             // Fuel Level Volume (L) -> delta positivo stabile >= 2 min -> Ignition/GPS -> MIMIT.
              if(!ns){
               let recovery=await recoveryFromNextIgnition(f,deviceId);
               out.recovery=recovery;
@@ -562,34 +600,34 @@
              $("status").textContent="Avvio caricamento storico…";
              await new Promise(r=>setTimeout(r,0));
              let vid=$("vehicle").value,fromValue=$("dateFrom").value,toValue=$("dateTo").value;
-             if(!vid){$("cc-status").className="cc-status err";$("cc-status").textContent="Seleziona un veicolo.";return}
-             if(!fromValue||!toValue){$("cc-status").className="cc-status err";$("cc-status").textContent="Seleziona la data iniziale e la data finale.";return}
-             if(fromValue>toValue){$("cc-status").className="cc-status err";$("cc-status").textContent="La data iniziale non può essere successiva alla data finale.";return}
+             if(!vid){$("status").className="cc-status err";$("status").textContent="Seleziona un veicolo.";return}
+             if(!fromValue||!toValue){$("status").className="cc-status err";$("status").textContent="Seleziona la data iniziale e la data finale.";return}
+             if(fromValue>toValue){$("status").className="cc-status err";$("status").textContent="La data iniziale non può essere successiva alla data finale.";return}
              let from=new Date(`${fromValue}T00:00:00`),to=new Date(`${toValue}T23:59:59.999`);
-             exportEnabled(false);lastItems=[];$("load").disabled=true;$("cc-status").className="cc-status";$("cc-status").textContent="Caricamento rifornimenti…";
+             exportEnabled(false);lastItems=[];$("load").disabled=true;$("status").className="cc-status";$("status").textContent="Caricamento rifornimenti…";
              try{
               let fills=await get("FillUp",{deviceSearch:{id:vid},fromDate:from.toISOString(),toDate:to.toISOString()},50000);
               fills=(fills||[]).sort((a,b)=>new Date(b.dateTime||b.date)-new Date(a.dateTime||a.date));
               let v=vehicles.find(x=>x.id===vid)||{},vf=await fuelForVehicle(v),out=[];
               for(let i=0;i<fills.length;i++){
-               $("cc-status").textContent=`Analisi rifornimento ${i+1} di ${fills.length}: posizione FillUp / recupero rapido da aumento carburante…`;
+               $("status").textContent=`Analisi rifornimento ${i+1} di ${fills.length}: posizione FillUp / recupero rapido da aumento carburante…`;
                let item;
                try{item=await processFill(fills[i],vf,vid)}
                catch(e){item={date:fills[i].dateTime||fills[i].date,liters:litersOf(fills[i]),fuel:vf,error:e.message}}
                out.push(item);
               }
-              lastItems=out;lastVehicle=v;render(out);exportEnabled(out.length>0);$("cc-status").className="cc-status ok";$("cc-status").textContent=`Completato: ${fills.length} rifornimenti analizzati dal ${from.toLocaleDateString("it-IT")} al ${to.toLocaleDateString("it-IT")}.`;
-             }catch(e){$("cc-status").className="cc-status err";$("cc-status").textContent="Errore: "+e.message}
+              lastItems=out;lastVehicle=v;render(out);exportEnabled(out.length>0);$("status").className="cc-status ok";$("status").textContent=`Completato: ${fills.length} rifornimenti analizzati dal ${from.toLocaleDateString("it-IT")} al ${to.toLocaleDateString("it-IT")}.`;
+             }catch(e){$("status").className="cc-status err";$("status").textContent="Errore: "+e.message}
              finally{$("load").disabled=false}
             }
             async function init(myApi){
-             api=myApi;setDefaultDates();$("cc-status").textContent="MyGeotab collegato. Caricamento veicoli…";
+             api=myApi;setDefaultDates();$("status").textContent="MyGeotab collegato. Caricamento veicoli…";
              try{
               await loadCoverage();
               vehicles=await get("Device",{},50000);vehicles=(vehicles||[]).filter(v=>!v.isArchived).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
               $("vehicle").innerHTML='<option value="">Seleziona un veicolo…</option>'+vehicles.map(v=>`<option value="${esc(v.id)}">${esc(v.name||v.id)}</option>`).join("");
-              $("load").disabled=false;$("cc-status").className="cc-status ok";$("cc-status").textContent=`MyGeotab collegato. ${vehicles.length} veicoli disponibili.`;
-             }catch(e){$("cc-status").className="cc-status err";$("cc-status").textContent="Errore MyGeotab: "+e.message}
+              $("load").disabled=false;$("status").className="cc-status ok";$("status").textContent=`MyGeotab collegato. ${vehicles.length} veicoli disponibili.`;
+             }catch(e){$("status").className="cc-status err";$("status").textContent="Errore MyGeotab: "+e.message}
             }
             let uiBound=false, dataLoaded=false, loading=false;
             function bindUi(){
