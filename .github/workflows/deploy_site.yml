@@ -22,6 +22,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -39,26 +40,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f main/index.html
-          test -f main/costiCarburante.js
-          test -f main/costiCarburante.css
-          echo "OK: tutti i file Add-In sono presenti"
+
+          test -s main/index.html
+          test -s main/costiCarburante.css
+
+          echo "OK: index.html presente"
+          echo "OK: CSS presente"
 
       - name: Prepara sito
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf site
           mkdir -p site
 
+          echo "Copio dataset..."
           test -d dataset/data
           cp -a dataset/data site/data
 
+          echo "Copio Add-In..."
           cp main/index.html site/index.html
-          cp main/costiCarburante.js site/costiCarburante.js
           cp main/costiCarburante.css site/costiCarburante.css
 
-          find main -maxdepth 1 -type f -name '*.html' ! -name 'index.html' -exec cp {} site/ \;
+          # Manteniamo anche il JS esterno se presente,
+          # anche se la versione standalone non lo utilizza.
+          if [ -f main/costiCarburante.js ]; then
+            cp main/costiCarburante.js site/costiCarburante.js
+          fi
+
+          # Copia eventuali pagine HTML di test
+          find main \
+            -maxdepth 1 \
+            -type f \
+            -name '*.html' \
+            ! -name 'index.html' \
+            -exec cp {} site/ \;
 
           touch site/.nojekyll
 
@@ -70,19 +87,39 @@ jobs:
           echo "=== FILE PUBBLICATI ==="
           find site -maxdepth 1 -type f -printf '%f\n' | sort
 
+          echo
+          echo "=== CONTROLLO ADD-IN ==="
+
           test -s site/index.html
-          test -s site/costiCarburante.js
+          echo "OK: index.html"
+
           test -s site/costiCarburante.css
+          echo "OK: costiCarburante.css"
 
           grep -q 'costiCarburante.css' site/index.html
-          grep -q 'costiCarburante.js' site/index.html
-          grep -q 'window.geotab.addin.costiCarburante' site/costiCarburante.js
+          echo "OK: CSS collegato"
+
+          # Versione standalone:
+          # il codice dell'Add-In deve essere dentro index.html
+          grep -q 'window.geotab.addin.costiCarburante' site/index.html
+          echo "OK: codice MyGeotab presente in index.html"
+
+          grep -q 'Add-In v27 caricato' site/index.html
+          echo "OK: versione v27 standalone rilevata"
+
+          echo
+          echo "=== CONTROLLO DATASET ==="
 
           test -f site/data/manifest.json
-          test -f site/data/prezzi/048/48907.json.gz
+          echo "OK: manifest.json"
 
-          echo "OK: Add-In completo"
-          echo "OK: dataset presente"
+          test -f site/data/prezzi/048/48907.json.gz
+          echo "OK: dataset prezzi 48907"
+
+          echo
+          echo "================================"
+          echo "OK: ADD-IN PRONTO PER IL DEPLOY"
+          echo "================================"
 
       - name: Configura Pages
         uses: actions/configure-pages@v5
@@ -96,8 +133,10 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+
     runs-on: ubuntu-latest
     needs: build
+
     steps:
       - name: Pubblica
         id: deployment
