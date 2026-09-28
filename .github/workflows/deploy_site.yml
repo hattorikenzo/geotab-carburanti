@@ -2,8 +2,10 @@ name: Deploy sito GitHub Pages
 
 on:
   workflow_dispatch:
+
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - "*.html"
       - "*.js"
@@ -20,15 +22,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
   build:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ============================================================
+      # CHECKOUT CODICE ADD-IN
+      # ============================================================
+
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
           path: main
+
+
+      # ============================================================
+      # CHECKOUT DATASET MIMIT
+      # ============================================================
 
       - name: Checkout dataset persistente
         uses: actions/checkout@v4
@@ -36,40 +49,89 @@ jobs:
           ref: gh-pages
           path: dataset
 
+
+      # ============================================================
+      # CONTROLLO FILE PRINCIPALI
+      # ============================================================
+
       - name: Verifica file Add-In
         shell: bash
         run: |
           set -euo pipefail
 
-          test -s main/index.html
-          test -s main/costiCarburante.css
+          echo "=== CONTROLLO FILE SORGENTE ==="
 
-          echo "OK: index.html presente"
-          echo "OK: CSS presente"
+          test -s main/index.html
+          echo "OK: index.html"
+
+          test -s main/costiCarburante.css
+          echo "OK: costiCarburante.css"
+
+          # costiCarburante.js non è obbligatorio:
+          # la versione standalone contiene il JavaScript in index.html.
+
+          if [ -s main/costiCarburante.js ]; then
+            echo "INFO: costiCarburante.js presente"
+          else
+            echo "INFO: costiCarburante.js non presente - modalità standalone"
+          fi
+
+
+      # ============================================================
+      # PREPARAZIONE CARTELLA GITHUB PAGES
+      # ============================================================
 
       - name: Prepara sito
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "=== PREPARAZIONE SITO ==="
+
           rm -rf site
           mkdir -p site
 
-          echo "Copio dataset..."
-          test -d dataset/data
+          # --------------------------------------------------------
+          # Dataset MIMIT
+          # --------------------------------------------------------
+
+          if [ ! -d dataset/data ]; then
+            echo "ERRORE: cartella dataset/data non trovata"
+            exit 1
+          fi
+
+          echo "Copio dataset MIMIT..."
           cp -a dataset/data site/data
 
-          echo "Copio Add-In..."
+
+          # --------------------------------------------------------
+          # Add-In standalone
+          # --------------------------------------------------------
+
+          echo "Copio index.html..."
           cp main/index.html site/index.html
+
+          echo "Copio CSS..."
           cp main/costiCarburante.css site/costiCarburante.css
 
-          # Manteniamo anche il JS esterno se presente,
-          # anche se la versione standalone non lo utilizza.
+
+          # --------------------------------------------------------
+          # JS esterno opzionale
+          # --------------------------------------------------------
+
+          # Lo manteniamo se presente nel repository.
+          # La versione standalone non dipende da questo file.
+
           if [ -f main/costiCarburante.js ]; then
+            echo "Copio costiCarburante.js..."
             cp main/costiCarburante.js site/costiCarburante.js
           fi
 
-          # Copia eventuali pagine HTML di test
+
+          # --------------------------------------------------------
+          # Eventuali pagine HTML di test
+          # --------------------------------------------------------
+
           find main \
             -maxdepth 1 \
             -type f \
@@ -77,18 +139,37 @@ jobs:
             ! -name 'index.html' \
             -exec cp {} site/ \;
 
+
+          # --------------------------------------------------------
+          # Disabilita elaborazione Jekyll
+          # --------------------------------------------------------
+
           touch site/.nojekyll
+
+          echo "Preparazione completata"
+
+
+      # ============================================================
+      # VERIFICA PRIMA DEL DEPLOY
+      # ============================================================
 
       - name: Verifica sito prima del deploy
         shell: bash
         run: |
           set -euo pipefail
 
+          echo
+          echo "================================"
           echo "=== FILE PUBBLICATI ==="
+          echo "================================"
+
           find site -maxdepth 1 -type f -printf '%f\n' | sort
 
+
           echo
+          echo "================================"
           echo "=== CONTROLLO ADD-IN ==="
+          echo "================================"
 
           test -s site/index.html
           echo "OK: index.html"
@@ -96,48 +177,105 @@ jobs:
           test -s site/costiCarburante.css
           echo "OK: costiCarburante.css"
 
-          grep -q 'costiCarburante.css' site/index.html
-          echo "OK: CSS collegato"
 
-          # Versione standalone:
-          # il codice dell'Add-In deve essere dentro index.html
-          grep -q 'window.geotab.addin.costiCarburante' site/index.html
-          echo "OK: codice MyGeotab presente in index.html"
+          # --------------------------------------------------------
+          # Controllo CSS
+          # --------------------------------------------------------
 
-          grep -q 'Add-In v27 caricato' site/index.html
-          echo "OK: versione v27 standalone rilevata"
+          if grep -q 'costiCarburante.css' site/index.html; then
+            echo "OK: CSS collegato"
+          else
+            echo "ERRORE: riferimento costiCarburante.css non trovato"
+            exit 1
+          fi
+
+
+          # --------------------------------------------------------
+          # Controllo Add-In MyGeotab
+          # --------------------------------------------------------
+
+          # NON controlliamo il numero di versione.
+          # In questo modo v28, v29, v30 ecc. non romperanno il deploy.
+
+          if grep -q 'window.geotab.addin.costiCarburante' site/index.html; then
+            echo "OK: codice MyGeotab standalone presente in index.html"
+          else
+            echo "ERRORE: codice MyGeotab non trovato in index.html"
+            exit 1
+          fi
+
 
           echo
+          echo "================================"
           echo "=== CONTROLLO DATASET ==="
+          echo "================================"
 
-          test -f site/data/manifest.json
-          echo "OK: manifest.json"
 
-          test -f site/data/prezzi/048/48907.json.gz
-          echo "OK: dataset prezzi 48907"
+          # --------------------------------------------------------
+          # Manifest
+          # --------------------------------------------------------
+
+          if [ -f site/data/manifest.json ]; then
+            echo "OK: manifest.json"
+          else
+            echo "ERRORE: manifest.json non trovato"
+            exit 1
+          fi
+
+
+          # --------------------------------------------------------
+          # File prezzi di controllo
+          # --------------------------------------------------------
+
+          if [ -f site/data/prezzi/048/48907.json.gz ]; then
+            echo "OK: dataset prezzi 48907"
+          else
+            echo "ERRORE: dataset prezzi 48907 non trovato"
+            exit 1
+          fi
+
 
           echo
           echo "================================"
           echo "OK: ADD-IN PRONTO PER IL DEPLOY"
           echo "================================"
 
+
+      # ============================================================
+      # CONFIGURAZIONE GITHUB PAGES
+      # ============================================================
+
       - name: Configura Pages
         uses: actions/configure-pages@v5
+
+
+      # ============================================================
+      # CREAZIONE ARTIFACT
+      # ============================================================
 
       - name: Carica artifact
         uses: actions/upload-pages-artifact@v4
         with:
           path: site
 
+
+  # ==============================================================
+  # DEPLOY
+  # ==============================================================
+
   deploy:
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     runs-on: ubuntu-latest
-    needs: build
+
+    needs:
+      - build
 
     steps:
+
       - name: Pubblica
         id: deployment
         uses: actions/deploy-pages@v4
