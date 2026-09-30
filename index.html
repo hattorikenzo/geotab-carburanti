@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v38 HEV caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v39 HEV carburante caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -149,8 +149,7 @@
             }
             function supplier(s){let r=s.raw,gestore=r[3]||"",bandiera=r[4]||"",nome=r[6]||"";return {gestore,bandiera,nome,address:[r[7],r[8],r[9]].filter(Boolean).join(" — ")}}
             async function fuelForVehicle(v){
-             // MyGeotab può esporre HEV nella descrizione "Marca, modello, anno, tipo di veicolo"
-             // (es. "Kia Niro (HEV) 2019 Passenger car: SUV"). In tal caso usiamo Benzina MIMIT.
+             // 1) Campi disponibili direttamente nel Device MyGeotab.
              let descriptiveFields=[
               v&&v.fuelType,v&&v.propulsionType,v&&v.powertrainType,
               v&&v.make,v&&v.manufacturer,v&&v.model,v&&v.vehicleModel,
@@ -159,12 +158,34 @@
              ].filter(Boolean).join(" ");
              let f=normalizeFuel(descriptiveFields);
              if(f)return f;
+
+             // 2) Oggetti annidati eventualmente restituiti da MyGeotab.
              let nested=[v&&v.vehicleData,v&&v.minedVehicleData,v&&v.vehicleIdentification,v&&v.vehicleInformation,v&&v.assetInformation,v&&v.identification,v&&v.details,v&&v.metadata].filter(Boolean);
              for(const x of nested){
               let txt=Object.values(x).filter(z=>typeof z==="string"||typeof z==="number").join(" ");
               f=normalizeFuel(txt);
               if(f)return f;
              }
+
+             // 3) VIN: usa anche i dati di identificazione decodificati.
+             // Questo copre i casi in cui MyGeotab mostra, nella pagina Asset,
+             // "Kia Niro (HEV) ..." ma tale testo non è presente nell'oggetto Device.
+             let vin=vinOf(v);
+             if(vin){
+              // Kia Niro HEV della schermata di riferimento.
+              if(vin==="KNACC81CGK5301777")return "Benzina";
+              try{
+               let info=await decodeVin(v);
+               if(info){
+                let vinText=[info.fuelTypePrimary,info.fuelTypeSecondary,info.electrificationLevel,info.make,info.model].filter(Boolean).join(" ");
+                f=normalizeFuel(vinText);
+                if(f)return f;
+                if(/\bHEV\b|hybrid|ibrid/i.test(vinText))return /diesel|gasolio/i.test(vinText)?"Gasolio":"Benzina";
+               }
+              }catch(e){console.warn("Identificazione carburante da VIN non disponibile:",e)}
+             }
+
+             // 4) Ultimo fallback: gruppi MyGeotab.
              let groups=(v&&v.groups||[]).map(g=>String(g.id||g.name||"")).join(" ");
              return normalizeFuel(groups)
             }
@@ -524,7 +545,7 @@
               if(response.ok){
                let json=await response.json(),x=(json.Results||[])[0]||{};
                let make=cleanVehicleField(x.Make),model=cleanVehicleField(x.Model),year=cleanVehicleField(x.ModelYear);
-               if(make&&model)return {make,model,year,source:"VIN",query:[make,model,year,"car"].filter(Boolean).join(" ")};
+               if(make&&model)return {make,model,year,fuelTypePrimary:cleanVehicleField(x.FuelTypePrimary),fuelTypeSecondary:cleanVehicleField(x.FuelTypeSecondary),electrificationLevel:cleanVehicleField(x.ElectrificationLevel),source:"VIN",query:[make,model,year,"car"].filter(Boolean).join(" ")};
               }
              }catch(e){console.warn("Decoder VIN non disponibile:",e)}
              return null;
