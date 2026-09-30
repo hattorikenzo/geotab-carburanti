@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v37 caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v38 HEV caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -61,8 +61,18 @@
             function isoNoZone(v){let d=new Date(v);if(isNaN(d))return String(v).slice(0,19);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,19)}
             function hav(lat1,lon1,lat2,lon2){const R=6371000,p=Math.PI/180,a=Math.sin((lat2-lat1)*p/2)**2+Math.cos(lat1*p)*Math.cos(lat2*p)*Math.sin((lon2-lon1)*p/2)**2;return 2*R*Math.asin(Math.sqrt(a))}
             function normalizeFuel(v){
-             // SAFE_HEV_MAPPING: HEV usa benzina per il prezzo MIMIT.
-             if(/^\s*hev\s*$/i.test(String(v||"")))return "Benzina";let s=String(v||"").toLowerCase();if(/diesel|gasolio/.test(s))return "Gasolio";if(/sp95|gasoline|petrol|benzina/.test(s))return "Benzina";if(/lpg|gpl/.test(s))return "GPL";if(/cng|metano/.test(s))return "Metano";return ""}
+             // HEV / Hybrid: per MIMIT il carburante da ricercare è quello termico.
+             // Prima riconosciamo esplicitamente gli ibridi diesel, poi gli HEV/ibridi benzina.
+             let raw=String(v||"").trim();
+             let s=raw.toLowerCase();
+             if(/(diesel|gasolio).*(hev|hybrid|ibrid)|(hev|hybrid|ibrid).*(diesel|gasolio)/i.test(raw))return "Gasolio";
+             if(/\bhev\b|hybrid|ibrid/i.test(raw))return "Benzina";
+             if(/diesel|gasolio/.test(s))return "Gasolio";
+             if(/sp95|gasoline|petrol|benzina/.test(s))return "Benzina";
+             if(/lpg|gpl/.test(s))return "GPL";
+             if(/cng|metano/.test(s))return "Metano";
+             return ""
+            }
             function fillCoords(f){let lat=f.latitude,lon=f.longitude;if(f.location){if(lat==null)lat=f.location.y;if(lon==null)lon=f.location.x}lat=Number(lat);lon=Number(lon);return Number.isFinite(lat)&&Number.isFinite(lon)?[lat,lon]:null}
             function litersOf(f){for(const k of ["volume","liters","fuelVolume","totalFuel"]){let n=Number(f[k]);if(Number.isFinite(n)&&n>0)return n}return 0}
             const jsonCache=new Map(),gzipCache=new Map();
@@ -138,7 +148,26 @@
              return null;
             }
             function supplier(s){let r=s.raw,gestore=r[3]||"",bandiera=r[4]||"",nome=r[6]||"";return {gestore,bandiera,nome,address:[r[7],r[8],r[9]].filter(Boolean).join(" — ")}}
-            async function fuelForVehicle(v){let f=normalizeFuel(v.fuelType||v.propulsionType||v.powertrainType);if(f)return f;let groups=(v.groups||[]).map(g=>String(g.id||g.name||"")).join(" ");return normalizeFuel(groups)}
+            async function fuelForVehicle(v){
+             // MyGeotab può esporre HEV nella descrizione "Marca, modello, anno, tipo di veicolo"
+             // (es. "Kia Niro (HEV) 2019 Passenger car: SUV"). In tal caso usiamo Benzina MIMIT.
+             let descriptiveFields=[
+              v&&v.fuelType,v&&v.propulsionType,v&&v.powertrainType,
+              v&&v.make,v&&v.manufacturer,v&&v.model,v&&v.vehicleModel,
+              v&&v.vehicleType,v&&v.type,v&&v.description,v&&v.comment,
+              v&&v.name
+             ].filter(Boolean).join(" ");
+             let f=normalizeFuel(descriptiveFields);
+             if(f)return f;
+             let nested=[v&&v.vehicleData,v&&v.minedVehicleData,v&&v.vehicleIdentification,v&&v.vehicleInformation,v&&v.assetInformation,v&&v.identification,v&&v.details,v&&v.metadata].filter(Boolean);
+             for(const x of nested){
+              let txt=Object.values(x).filter(z=>typeof z==="string"||typeof z==="number").join(" ");
+              f=normalizeFuel(txt);
+              if(f)return f;
+             }
+             let groups=(v&&v.groups||[]).map(g=>String(g.id||g.name||"")).join(" ");
+             return normalizeFuel(groups)
+            }
 
             const IGNITION_DIAG_ID="DiagnosticIgnitionId";
             const RECOVERY_AFTER_HOURS=48;
