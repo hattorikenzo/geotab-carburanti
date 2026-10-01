@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v40 HEV MyGeotab caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v41 HEV MyGeotab caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -238,8 +238,7 @@
 
             const REFUEL_STABLE_MINUTES=2;
             const REFUEL_STABLE_TOLERANCE_L=1.0;
-            const FUEL_VOLUME_CORRECTION_FACTOR=0.77; // -23%
-
+            
             function findVolumeRise(samples,fillLiters){
              let s=realSamples(samples);
              let best=null;
@@ -422,7 +421,7 @@
 
              if(rise&&Number(rise.rise)>0){
               out.rawFuelVolumeDelta=Number(rise.rise);
-              out.liters=Math.max(0,(Number(rise.after)-Number(rise.before))*0.77);
+              out.liters=Math.max(0,(Number(rise.after)-Number(rise.before)));
               out.litersFromDelta=true;
               out.date=rise.date||originalDate;
              }else{
