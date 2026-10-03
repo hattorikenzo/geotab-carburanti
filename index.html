@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v49.1 Device completo + VIN multi-database caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v50 stabile multi-database Dacia caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -201,7 +201,7 @@
              return out.join(" ");
             }
 
-            async function fuelForVehicleFromDevice(v){
+            async function fuelForVehicle(v){
              // REGOLA PRIORITARIA: se MyGeotab restituisce HEV in QUALSIASI dato
              // identificativo del veicolo (es. "Kia Niro (HEV) 2019"), per il
              // prezzo MIMIT usiamo BENZINA. Un riferimento esplicito a Diesel/Gasolio
@@ -228,36 +228,18 @@
                }
               }catch(e){console.warn("Identificazione carburante da VIN non disponibile:",e)}
              }
-             // v48: fallback carburante per veicoli noti dal VIN.
-             // Utile quando lo stesso veicolo è presente in database MyGeotab diversi
-             // e uno dei Device non espone FuelType/HEV negli stessi metadati.
+             // v50: fallback locale per veicoli noti.
+             // Nessuna chiamata Device aggiuntiva: non interferisce con l'avvio MyGeotab.
              let knownVin=vinOf(v);
              if(knownVin.startsWith("UU15SDAG35"))return "Benzina"; // Dacia Sandero
              if(knownVin.startsWith("VR3USHNKK"))return "Benzina"; // Peugeot 2008
 
-             return "";
-            }
+             // Nel database geotabfleet_eu il veicolo condiviso è denominato DaciaM&M.
+             // Se il VIN non è incluso nell'oggetto Device restituito all'Add-In,
+             // il nome costituisce l'ultimo fallback.
+             let deviceName=String(v&&v.name||"").trim().toLowerCase();
+             if(deviceName==="dacia m&m"||deviceName==="daciam&m")return "Benzina";
 
-
-            async function fuelForVehicle(v){
-             let full=v;
-             try{
-              if(api&&v&&v.id){
-               let rows=await get("Device",{id:v.id},10);
-               if(Array.isArray(rows)&&rows.length)full={...v,...rows[0]};
-              }
-             }catch(e){
-              console.warn("v49 Device completo non disponibile:",e);
-             }
-
-             // In alcuni database MyGeotab il VIN è disponibile solo nel Device completo.
-             let detected=await fuelForVehicleFromDevice(full);
-             if(detected)return detected;
-
-             // Fallback esplicito sul VIN completo restituito dal database.
-             let vv=vinOf(full);
-             if(vv==="UU15SDAG352380692"||vv.startsWith("UU15SDAG35"))return "Benzina";
-             if(vv.startsWith("VR3USHNKK"))return "Benzina";
              return "";
             }
 
