@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v47 selezione Self/Servito MIMIT caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v48 carburante da VIN multi-database caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -228,6 +228,13 @@
                }
               }catch(e){console.warn("Identificazione carburante da VIN non disponibile:",e)}
              }
+             // v48: fallback carburante per veicoli noti dal VIN.
+             // Utile quando lo stesso veicolo è presente in database MyGeotab diversi
+             // e uno dei Device non espone FuelType/HEV negli stessi metadati.
+             let knownVin=vinOf(v);
+             if(knownVin.startsWith("UU15SDAG35"))return "Benzina"; // Dacia Sandero
+             if(knownVin.startsWith("VR3USHNKK"))return "Benzina"; // Peugeot 2008
+
              return "";
             }
 
