@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v46 litri da campioni vicini al FillUp caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v47 selezione Self/Servito MIMIT caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -126,7 +126,7 @@
          return null;
         }
 
-            async function priceFromFile(url,fuel,fillDate,source){
+            async function priceFromFile(url,fuel,fillDate,source,mode){
              let o=await fetchGzip(url);
              let fillDay=localYmd(new Date(fillDate));
              let rows=[];
@@ -134,7 +134,7 @@
              for(const [key,arr] of Object.entries(o.prezzi||{})){
               let p=key.split("|"),name=p[0],self=String(p[1]??"");
               if(normalizeFuel(name)!==fuel)continue;
-              if(self!=="1")continue;
+              if(mode!==undefined&&mode!==null&&self!==String(mode))continue;
 
               let exact=[],previous=[];
               for(const r of arr||[]){
@@ -142,21 +142,14 @@
                if(day===fillDay)exact.push(r);
                if(day<=fillDay)previous.push(r);
               }
-
               let pool=exact.length?exact:previous;
-              pool.sort((a,b)=>String(b[0]).localeCompare(String(a[0])));
+              pool.sort((x,y)=>String(y[0]).localeCompare(String(x[0])));
               if(pool.length)rows.push({
-               date:String(pool[0][0]),
-               price:Number(pool[0][1]),
-               self,
-               source:pool[0][2]||source,
-               exact:exact.length>0
+               date:String(pool[0][0]),price:Number(pool[0][1]),self,
+               source:pool[0][2]||source,exact:exact.length>0
               });
              }
-
-             // Se più denominazioni MIMIT normalizzano allo stesso carburante,
-             // scegliamo la comunicazione più recente.
-             rows.sort((a,b)=>String(b.date).localeCompare(String(a.date)));
+             rows.sort((x,y)=>String(y.date).localeCompare(String(x.date)));
              return rows.length?rows[0]:null;
             }
 
@@ -170,25 +163,24 @@
              let bucket=String(Math.floor(stationId/1000)).padStart(3,"0");
              let mimitUrl=`${DATA_BASE}/prezzi/${bucket}/${stationId}.json.gz`;
 
-             // v45: lo storico dell'impianto è la fonte primaria anche nel trimestre
-             // corrente. Non blocchiamo ottobre/Q4 se non è ancora marcato come
-             // trimestre ufficiale in manifest/archivi_importati.
-             //
-             // priceFromFile applica già la stessa regola di Consulta Prezzi:
-             // SELF + stesso carburante + record del giorno se disponibile,
-             // altrimenti ultimo prezzo precedente valido.
-             let hp=await priceFromFile(mimitUrl,fuel,fillDate,"MIMIT").catch(()=>null);
-             if(hp)return {...hp,official:quarterIsOfficial(fillDate)};
+             let [selfPrice,servedPrice]=await Promise.all([
+              priceFromFile(mimitUrl,fuel,fillDate,"MIMIT","1").catch(()=>null),
+              priceFromFile(mimitUrl,fuel,fillDate,"MIMIT","0").catch(()=>null)
+             ]);
 
-             // Solo se il file storico dell'impianto non fornisce alcun prezzo,
-             // proviamo il fallback mensile.
+             let primary=selfPrice||servedPrice;
+             if(primary)return {
+              ...primary,
+              official:quarterIsOfficial(fillDate),
+              selfPrice:selfPrice,
+              servedPrice:servedPrice
+             };
+
              let fb=await priceFromDailyFallback(
               `${DATA_BASE}/fallback_mensile/${bucket}/${stationId}.json.gz`,
-              fuel,
-              fillDate
+              fuel,fillDate
              ).catch(()=>null);
-
-             return fb?{...fb,official:false}:null;
+             return fb?{...fb,official:false,selfPrice:null,servedPrice:null}:null;
             }
 
             function supplier(s){let r=s.raw,gestore=r[3]||"",bandiera=r[4]||"",nome=r[6]||"";return {gestore,bandiera,nome,address:[r[7],r[8],r[9]].filter(Boolean).join(" — ")}}
@@ -493,22 +485,78 @@
              if(!hp){out.error="Prezzo storico non trovato";return out}
 
              out.price=hp;
-             out.verified=true;
-             out.cost=out.liters*hp.price;
-             out.source=hp.source;
+             out.priceMode=hp.selfPrice?"1":(hp.servedPrice?"0":"1");
+             let chosen=out.priceMode==="0"?(hp.servedPrice||hp):(hp.selfPrice||hp.servedPrice||hp);
+             out.verified=!!chosen;
+             out.cost=chosen?out.liters*Number(chosen.price):0;
+             out.source=chosen?(chosen.source||"MIMIT"):"";
              return out;
             }
 
-            function render(items){
-             let tb=$("rows");tb.innerHTML="";let tl=0,tc=0,vl=0;
-             for(const x of items){
-              tl+=x.liters||0;if(x.verified){tc+=x.cost;vl+=x.liters}
-              let sup=x.supplier?`<div class="cc-supplier">${esc(x.supplier.gestore||x.supplier.nome||"Impianto MIMIT")}</div><div class="cc-sub">${esc([x.supplier.bandiera,x.supplier.nome].filter(Boolean).join(" — "))}</div><div class="cc-sub">${esc(x.supplier.address)}${x.station?` · ${dec(x.station.distance,1)} m`:""}</div>`:`<span class="cc-warn">${esc(x.error||"Non identificato")}</span>`;
-              let price=x.verified?`${dec(x.price.price,3)}<div class="cc-sub">${esc(dtLocal(x.price.date))}</div>`:`<span class="cc-warn">—</span>`,cost=x.verified?money(x.cost):"—",tr=document.createElement("tr");
-              tr.innerHTML=`<td>${esc(dtLocal(x.date))}</td><td>${sup}</td><td>${esc(x.fuel||"—")}</td><td class="cc-num">${price}</td><td>${esc(x.source||"—")}</td><td class="cc-num">${dec(x.liters||0,2)} L</td><td class="cc-num"><b>${cost}</b></td>`;tb.appendChild(tr);
+            function selectedPriceForItem(x){
+             if(!x||!x.price)return null;
+             let mode=x.priceMode||"1";
+             if(mode==="0"&&x.price.servedPrice)return x.price.servedPrice;
+             if(mode==="1"&&x.price.selfPrice)return x.price.selfPrice;
+             return x.price.selfPrice||x.price.servedPrice||x.price;
+            }
+
+            function recalcItemCost(x){
+             let p=selectedPriceForItem(x);
+             if(p&&Number.isFinite(Number(p.price))){
+              x.verified=true;
+              x.cost=(x.liters||0)*Number(p.price);
+              x.source=p.source||"MIMIT";
+             }else{
+              x.verified=false;x.cost=0;
              }
+            }
+
+            function render(items){
+             let tb=$("rows");tb.innerHTML="";
+             for(const x of items)recalcItemCost(x);
+
+             for(let index=0;index<items.length;index++){
+              let x=items[index];
+              let sup=x.supplier?`<div class="cc-supplier">${esc(x.supplier.gestore||x.supplier.nome||"Impianto MIMIT")}</div><div class="cc-sub">${esc([x.supplier.bandiera,x.supplier.nome].filter(Boolean).join(" — "))}</div><div class="cc-sub">${esc(x.supplier.address)}${x.station?` · ${dec(x.station.distance,1)} m`:""}</div>`:`<span class="cc-warn">${esc(x.error||"Non identificato")}</span>`;
+
+              let sp=x.price&&x.price.selfPrice, vp=x.price&&x.price.servedPrice;
+              let different=sp&&vp&&Math.abs(Number(sp.price)-Number(vp.price))>0.0005;
+              let fuelCell=esc(x.fuel||"—");
+
+              if(different){
+               fuelCell+=`<div class="cc-sub" style="margin-top:6px"><select class="cc-fuel-mode" data-index="${index}" style="max-width:130px;height:30px">
+                <option value="1"${(x.priceMode||"1")==="1"?" selected":""}>Self service</option>
+                <option value="0"${x.priceMode==="0"?" selected":""}>Servito</option>
+               </select></div>`;
+              }else if(sp&&vp){
+               fuelCell+=`<div class="cc-sub">Self / Servito</div>`;
+              }else if(sp){
+               fuelCell+=`<div class="cc-sub">Self service</div>`;
+              }else if(vp){
+               fuelCell+=`<div class="cc-sub">Servito</div>`;
+              }
+
+              let chosen=selectedPriceForItem(x);
+              let price=chosen?`${dec(chosen.price,3)}<div class="cc-sub">${esc(dtLocal(chosen.date))}</div>`:`<span class="cc-warn">—</span>`;
+              let cost=x.verified?money(x.cost):"—",tr=document.createElement("tr");
+              tr.innerHTML=`<td>${esc(dtLocal(x.date))}</td><td>${sup}</td><td>${fuelCell}</td><td class="cc-num">${price}</td><td>${esc(x.source||"—")}</td><td class="cc-num">${dec(x.liters||0,2)} L</td><td class="cc-num"><b>${cost}</b></td>`;
+              tb.appendChild(tr);
+             }
+
              if(!items.length)tb.innerHTML='<tr><td colspan="7" class="cc-muted">Nessun rifornimento nel periodo selezionato.</td></tr>';
+
+             let tl=0,tc=0,vl=0;
+             for(const x of items){tl+=x.liters||0;if(x.verified){tc+=x.cost;vl+=x.liters||0}}
              $("n").textContent=items.length;$("liters").textContent=dec(tl,2)+" L";$("total").textContent=money(tc);$("avg").textContent=vl>0?dec(tc/vl,3)+" €/L":"—";
+
+             tb.querySelectorAll(".cc-fuel-mode").forEach(sel=>sel.addEventListener("change",e=>{
+              let x=items[Number(e.target.dataset.index)];
+              if(!x)return;
+              x.priceMode=e.target.value;
+              recalcItemCost(x);
+              render(items);
+             }));
             }
 
             function vinOf(v){return String(v.vehicleIdentificationNumber||v.vin||v.serialNumber||"").trim().toUpperCase()}
