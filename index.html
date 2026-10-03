@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v44 stessa logica Consulta Prezzi MIMIT caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v45 Q4 prezzo MIMIT corrente caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -167,14 +167,30 @@
              return best;
             }
             async function historicalPrice(stationId,fuel,fillDate){
-             let bucket=String(Math.floor(stationId/1000)).padStart(3,"0"),mimitUrl=`${DATA_BASE}/prezzi/${bucket}/${stationId}.json.gz`;
-             if(quarterIsOfficial(fillDate)){let hp=await priceFromFile(mimitUrl,fuel,fillDate,"MIMIT").catch(()=>null);return hp?{...hp,official:true}:null}
-             let hp=await priceFromFile(mimitUrl,fuel,fillDate,"MIMIT giornaliero").catch(()=>null);
-             if(hp&&quarterOf(hp.date)===quarterOf(fillDate))return {...hp,official:false};
-             let fb=await priceFromDailyFallback(`${DATA_BASE}/fallback_mensile/${bucket}/${stationId}.json.gz`,fuel,fillDate).catch(()=>null);
-             if(fb&&quarterOf(fb.date)===quarterOf(fillDate))return {...fb,official:false};
-             return null;
+             let bucket=String(Math.floor(stationId/1000)).padStart(3,"0");
+             let mimitUrl=`${DATA_BASE}/prezzi/${bucket}/${stationId}.json.gz`;
+
+             // v45: lo storico dell'impianto è la fonte primaria anche nel trimestre
+             // corrente. Non blocchiamo ottobre/Q4 se non è ancora marcato come
+             // trimestre ufficiale in manifest/archivi_importati.
+             //
+             // priceFromFile applica già la stessa regola di Consulta Prezzi:
+             // SELF + stesso carburante + record del giorno se disponibile,
+             // altrimenti ultimo prezzo precedente valido.
+             let hp=await priceFromFile(mimitUrl,fuel,fillDate,"MIMIT").catch(()=>null);
+             if(hp)return {...hp,official:quarterIsOfficial(fillDate)};
+
+             // Solo se il file storico dell'impianto non fornisce alcun prezzo,
+             // proviamo il fallback mensile.
+             let fb=await priceFromDailyFallback(
+              `${DATA_BASE}/fallback_mensile/${bucket}/${stationId}.json.gz`,
+              fuel,
+              fillDate
+             ).catch(()=>null);
+
+             return fb?{...fb,official:false}:null;
             }
+
             function supplier(s){let r=s.raw,gestore=r[3]||"",bandiera=r[4]||"",nome=r[6]||"";return {gestore,bandiera,nome,address:[r[7],r[8],r[9]].filter(Boolean).join(" — ")}}
             function allVehicleText(v){
              // Legge ricorsivamente TUTTI i valori testuali/numerici restituiti
