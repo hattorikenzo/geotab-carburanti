@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v41 HEV MyGeotab caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v42 prezzo MIMIT temporale corretto caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -128,10 +128,33 @@
 
             async function priceFromFile(url,fuel,fillDate,source){
              let o=await fetchGzip(url),keys=Object.keys(o.prezzi||{}),candidates=[];
-             for(const key of keys){let [name,self]=key.split("|");if(normalizeFuel(name)!==fuel)continue;for(const r of o.prezzi[key]||[]){if(String(r[0])<=fillDate)candidates.push({date:String(r[0]),price:Number(r[1]),self,source:r[2]||source})}}
-             candidates.sort((a,b)=>b.date.localeCompare(a.date));if(!candidates.length)return null;
-             let latest=candidates[0],self=candidates.find(x=>x.self==="1"&&x.date===latest.date);return self||latest;
+             let fillMs=new Date(fillDate).getTime();
+             if(!Number.isFinite(fillMs))return null;
+
+             // Prima scelta: prezzo SELF. Se non esiste, fallback su altra modalità.
+             // La selezione è temporale reale: ultima comunicazione MIMIT <= rifornimento.
+             for(const selfOnly of [true,false]){
+              candidates=[];
+              for(const key of keys){
+               let [name,self]=key.split("|");
+               if(normalizeFuel(name)!==fuel)continue;
+               if(selfOnly&&String(self)!=="1")continue;
+               for(const r of o.prezzi[key]||[]){
+                let rawDate=String(r[0]||"");
+                let price=Number(r[1]);
+                let ms=new Date(rawDate).getTime();
+                if(!Number.isFinite(ms)||!Number.isFinite(price))continue;
+                if(ms<=fillMs)candidates.push({
+                 date:rawDate,ms,price,self:String(self),source:r[2]||source
+                });
+               }
+              }
+              if(candidates.length)break;
+             }
+             candidates.sort((a,b)=>b.ms-a.ms);
+             return candidates.length?candidates[0]:null;
             }
+
             async function priceFromDailyFallback(url,fuel,fillDate){
              let o=await fetchGzip(url),arr=(o.giornalieri||{})[fuel]||[];
              let fillDay=String(fillDate).slice(0,10),best=null;
