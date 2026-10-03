@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v48 carburante da VIN multi-database caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v49 Device completo + VIN multi-database caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -201,7 +201,7 @@
              return out.join(" ");
             }
 
-            async function fuelForVehicle(v){
+            function fuelForVehicleFromDevice(v){
              // REGOLA PRIORITARIA: se MyGeotab restituisce HEV in QUALSIASI dato
              // identificativo del veicolo (es. "Kia Niro (HEV) 2019"), per il
              // prezzo MIMIT usiamo BENZINA. Un riferimento esplicito a Diesel/Gasolio
@@ -235,6 +235,29 @@
              if(knownVin.startsWith("UU15SDAG35"))return "Benzina"; // Dacia Sandero
              if(knownVin.startsWith("VR3USHNKK"))return "Benzina"; // Peugeot 2008
 
+             return "";
+            }
+
+
+            async function fuelForVehicle(v){
+             let full=v;
+             try{
+              if(api&&v&&v.id){
+               let rows=await apiCall("Get",{typeName:"Device",search:{id:v.id}});
+               if(Array.isArray(rows)&&rows.length)full={...v,...rows[0]};
+              }
+             }catch(e){
+              console.warn("v49 Device completo non disponibile:",e);
+             }
+
+             // In alcuni database MyGeotab il VIN è disponibile solo nel Device completo.
+             let detected=fuelForVehicleFromDevice(full);
+             if(detected)return detected;
+
+             // Fallback esplicito sul VIN completo restituito dal database.
+             let vv=vinOf(full);
+             if(vv==="UU15SDAG352380692"||vv.startsWith("UU15SDAG35"))return "Benzina";
+             if(vv.startsWith("VR3USHNKK"))return "Benzina";
              return "";
             }
 
