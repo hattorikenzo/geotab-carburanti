@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v42 prezzo MIMIT temporale corretto caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v43 MIMIT no-cache caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -78,13 +78,13 @@
             const jsonCache=new Map(),gzipCache=new Map();
             async function fetchJson(url){
              if(jsonCache.has(url))return jsonCache.get(url);
-             let p=fetch(url,{cache:"force-cache"}).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status+" "+url);return r.json()});
+             let p=fetch(url,{cache:"no-store"}).then(r=>{if(!r.ok)throw new Error("HTTP "+r.status+" "+url);return r.json()});
              jsonCache.set(url,p);
              try{return await p}catch(e){jsonCache.delete(url);throw e}
             }
             async function fetchGzip(url){
              if(gzipCache.has(url))return gzipCache.get(url);
-             let p=(async()=>{let r=await fetch(url,{cache:"force-cache"});if(!r.ok)throw new Error("HTTP "+r.status+" "+url);if(!("DecompressionStream" in window))throw new Error("Browser senza supporto gzip DecompressionStream");let b=await r.blob(),ds=new DecompressionStream("gzip");return JSON.parse(await new Response(b.stream().pipeThrough(ds)).text())})();
+             let p=(async()=>{let r=await fetch(url,{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status+" "+url);if(!("DecompressionStream" in window))throw new Error("Browser senza supporto gzip DecompressionStream");let b=await r.blob(),ds=new DecompressionStream("gzip");return JSON.parse(await new Response(b.stream().pipeThrough(ds)).text())})();
              gzipCache.set(url,p);
              try{return await p}catch(e){gzipCache.delete(url);throw e}
             }
@@ -128,33 +128,10 @@
 
             async function priceFromFile(url,fuel,fillDate,source){
              let o=await fetchGzip(url),keys=Object.keys(o.prezzi||{}),candidates=[];
-             let fillMs=new Date(fillDate).getTime();
-             if(!Number.isFinite(fillMs))return null;
-
-             // Prima scelta: prezzo SELF. Se non esiste, fallback su altra modalità.
-             // La selezione è temporale reale: ultima comunicazione MIMIT <= rifornimento.
-             for(const selfOnly of [true,false]){
-              candidates=[];
-              for(const key of keys){
-               let [name,self]=key.split("|");
-               if(normalizeFuel(name)!==fuel)continue;
-               if(selfOnly&&String(self)!=="1")continue;
-               for(const r of o.prezzi[key]||[]){
-                let rawDate=String(r[0]||"");
-                let price=Number(r[1]);
-                let ms=new Date(rawDate).getTime();
-                if(!Number.isFinite(ms)||!Number.isFinite(price))continue;
-                if(ms<=fillMs)candidates.push({
-                 date:rawDate,ms,price,self:String(self),source:r[2]||source
-                });
-               }
-              }
-              if(candidates.length)break;
-             }
-             candidates.sort((a,b)=>b.ms-a.ms);
-             return candidates.length?candidates[0]:null;
+             for(const key of keys){let [name,self]=key.split("|");if(normalizeFuel(name)!==fuel)continue;for(const r of o.prezzi[key]||[]){if(String(r[0])<=fillDate)candidates.push({date:String(r[0]),price:Number(r[1]),self,source:r[2]||source})}}
+             candidates.sort((a,b)=>b.date.localeCompare(a.date));if(!candidates.length)return null;
+             let latest=candidates[0],self=candidates.find(x=>x.self==="1"&&x.date===latest.date);return self||latest;
             }
-
             async function priceFromDailyFallback(url,fuel,fillDate){
              let o=await fetchGzip(url),arr=(o.giornalieri||{})[fuel]||[];
              let fillDay=String(fillDate).slice(0,10),best=null;
@@ -568,7 +545,7 @@
              if(known)return known;
              try{
               let url="https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/"+encodeURIComponent(vin)+"?format=json";
-              let response=await fetch(url,{cache:"force-cache"});
+              let response=await fetch(url,{cache:"no-store"});
               if(response.ok){
                let json=await response.json(),x=(json.Results||[])[0]||{};
                let make=cleanVehicleField(x.Make),model=cleanVehicleField(x.Model),year=cleanVehicleField(x.ModelYear);
