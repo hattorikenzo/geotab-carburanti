@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v43 MIMIT no-cache caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v44 stessa logica Consulta Prezzi MIMIT caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -127,11 +127,39 @@
         }
 
             async function priceFromFile(url,fuel,fillDate,source){
-             let o=await fetchGzip(url),keys=Object.keys(o.prezzi||{}),candidates=[];
-             for(const key of keys){let [name,self]=key.split("|");if(normalizeFuel(name)!==fuel)continue;for(const r of o.prezzi[key]||[]){if(String(r[0])<=fillDate)candidates.push({date:String(r[0]),price:Number(r[1]),self,source:r[2]||source})}}
-             candidates.sort((a,b)=>b.date.localeCompare(a.date));if(!candidates.length)return null;
-             let latest=candidates[0],self=candidates.find(x=>x.self==="1"&&x.date===latest.date);return self||latest;
+             let o=await fetchGzip(url);
+             let fillDay=localYmd(new Date(fillDate));
+             let rows=[];
+
+             for(const [key,arr] of Object.entries(o.prezzi||{})){
+              let p=key.split("|"),name=p[0],self=String(p[1]??"");
+              if(normalizeFuel(name)!==fuel)continue;
+              if(self!=="1")continue;
+
+              let exact=[],previous=[];
+              for(const r of arr||[]){
+               let dt=String(r[0]||""),day=dt.slice(0,10);
+               if(day===fillDay)exact.push(r);
+               if(day<=fillDay)previous.push(r);
+              }
+
+              let pool=exact.length?exact:previous;
+              pool.sort((a,b)=>String(b[0]).localeCompare(String(a[0])));
+              if(pool.length)rows.push({
+               date:String(pool[0][0]),
+               price:Number(pool[0][1]),
+               self,
+               source:pool[0][2]||source,
+               exact:exact.length>0
+              });
+             }
+
+             // Se più denominazioni MIMIT normalizzano allo stesso carburante,
+             // scegliamo la comunicazione più recente.
+             rows.sort((a,b)=>String(b.date).localeCompare(String(a.date)));
+             return rows.length?rows[0]:null;
             }
+
             async function priceFromDailyFallback(url,fuel,fillDate){
              let o=await fetchGzip(url),arr=(o.giornalieri||{})[fuel]||[];
              let fillDay=String(fillDate).slice(0,10),best=null;
