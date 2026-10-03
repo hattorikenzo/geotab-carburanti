@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v45 Q4 prezzo MIMIT corrente caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v46 litri da campioni vicini al FillUp caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -401,19 +401,14 @@
              let fillDate=f.dateTime||f.date||f.timestamp;
              if(!fillDate)return null;
 
-             // FONTE ESATTA indicata dal Profilo dati del motore MyGeotab:
-             // LIVELLO DEL CARBURANTE (VOLUME) - DiagnosticFuelUnitsId.
-             // Cerchiamo il salto nella giornata del FillUp e, per gestire
-             // registrazioni ritardate, fino alle 48 ore successive.
              let base=new Date(fillDate);
-             let dayStart=new Date(base);
-             dayStart.setHours(0,0,0,0);
-             let to=new Date(dayStart.getTime()+72*60*60*1000);
+             let from=new Date(base.getTime()-30*60*1000);
+             let to=new Date(base.getTime()+90*60*1000);
 
              let rows=await statusWindow(
               deviceId,
               FUEL_VOLUME_DIAGNOSTIC_ID,
-              dayStart,
+              from,
               to
              ).catch(()=>[]);
 
@@ -421,36 +416,34 @@
              if(s.length<2)return null;
 
              let fillMs=base.getTime();
-             let candidates=[];
 
-             for(let i=1;i<s.length;i++){
-              let a=s[i-1],b=s[i];
-              let before=Number(a.data),after=Number(b.data);
-              if(!Number.isFinite(before)||!Number.isFinite(after))continue;
-              if(before<0||after<0)continue;
+             // v46: ricostruiamo l'intero aumento di livello vicino al FillUp.
+             // Il vecchio algoritmo cercava un singolo salto >=3 L e poteva
+             // scegliere campioni troppo lontani, sovrastimando i litri.
+             let before=s.filter(x=>new Date(x.date).getTime()<=fillMs);
+             let after=s.filter(x=>new Date(x.date).getTime()>fillMs);
+             if(!before.length||!after.length)return null;
 
-              let rise=after-before;
-              if(rise<3)continue;
+             // Ultimo campione reale prima del FillUp.
+             let pre=before[before.length-1];
 
-              let bms=new Date(b.date).getTime();
+             // Nei 30 minuti successivi cerchiamo il livello massimo raggiunto:
+             // gestisce rifornimenti registrati in più incrementi (es. 21→24→28→31).
+             let after30=after.filter(x=>new Date(x.date).getTime()<=fillMs+30*60*1000);
+             if(!after30.length)after30=after.slice(0,1);
 
-              // Il salto deve appartenere al giorno del FillUp o alle 48 ore
-              // successive. Preferiamo quello temporalmente più vicino al FillUp.
-              if(bms<dayStart.getTime()||bms>to.getTime())continue;
+             let peak=after30.reduce((best,x)=>Number(x.data)>Number(best.data)?x:best,after30[0]);
+             let rise=Number(peak.data)-Number(pre.data);
+             if(!Number.isFinite(rise)||rise<3)return null;
 
-              candidates.push({
-               before,
-               after,
-               rise,
-               date:b.date,
-               diagnosticId:FUEL_VOLUME_DIAGNOSTIC_ID,
-               distanceFromFill:Math.abs(bms-fillMs)
-              });
-             }
-
-             if(!candidates.length)return null;
-             candidates.sort((a,b)=>a.distanceFromFill-b.distanceFromFill);
-             return candidates[0];
+             return {
+              before:Number(pre.data),
+              after:Number(peak.data),
+              rise,
+              date:peak.date,
+              diagnosticId:FUEL_VOLUME_DIAGNOSTIC_ID,
+              method:"delta livello vicino al FillUp"
+             };
             }
 
             async function processFill(f,vehicleFuel,deviceId){
