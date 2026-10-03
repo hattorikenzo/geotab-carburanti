@@ -1,0 +1,181 @@
+name: Aggiorna prezzi MIMIT correnti
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Ogni giorno alle 09:15 italiane circa (07:15 UTC; in inverno 08:15 locali).
+    - cron: "15 7 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aggiorna-mimit-corrente
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout dataset gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Scarica prezzi correnti MIMIT
+        shell: bash
+        run: |
+          set -e
+          URL="https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
+          for n in 1 2 3 4; do
+            echo "Tentativo $n..."
+            if curl -fL --connect-timeout 20 --max-time 120 \
+              --retry 2 --retry-delay 5 \
+              -A "Mozilla/5.0" \
+              "$URL" -o /tmp/prezzo_alle_8.csv; then
+              break
+            fi
+            sleep 10
+          done
+          test -s /tmp/prezzo_alle_8.csv
+          echo "Prime righe:"
+          head -n 3 /tmp/prezzo_alle_8.csv
+
+      - name: Aggiorna blocco corrente nei gzip
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv, gzip, io, json, re
+          from datetime import datetime
+          from pathlib import Path
+
+          CSV=Path("/tmp/prezzo_alle_8.csv")
+          ROOT=Path("data/prezzi")
+
+          def decode(data):
+              try: return data.decode("utf-8-sig")
+              except UnicodeDecodeError: return data.decode("latin-1")
+
+          def clean(x):
+              return (x or "").strip().lstrip("\ufeff")
+
+          def parse_dt(x):
+              x=clean(x)
+              for f in ("%d/%m/%Y %H:%M:%S","%d/%m/%Y %H:%M",
+                        "%Y-%m-%d %H:%M:%S","%Y-%m-%d %H:%M",
+                        "%Y-%m-%dT%H:%M:%S"):
+                  try: return datetime.strptime(x,f)
+                  except ValueError: pass
+              return datetime.fromisoformat(x.replace("Z","+00:00")).replace(tzinfo=None)
+
+          raw=CSV.read_bytes()
+          text=decode(raw)
+          lines=text.splitlines()
+          header_i=next((i for i,l in enumerate(lines[:30]) if "idimpianto" in l.lower()),None)
+          if header_i is None:
+              raise SystemExit("Header idImpianto non trovato nel CSV MIMIT")
+
+          sample="\n".join(lines[header_i:header_i+12])
+          delim="|" if sample.count("|") > sample.count(";") else ";"
+          reader=csv.DictReader(io.StringIO("\n".join(lines[header_i:])),delimiter=delim)
+          fields={clean(x).lower():x for x in (reader.fieldnames or []) if x}
+
+          def get(row,name):
+              return row.get(fields.get(name.lower(),""),"")
+
+          latest={}
+          valid=bad=0
+          max_dt=None
+
+          for row in reader:
+              try:
+                  sid=int(clean(get(row,"idImpianto")))
+                  fuel=clean(get(row,"descCarburante"))
+                  price=float(clean(get(row,"prezzo")).replace(",","."))
+                  selfv=1 if clean(get(row,"isSelf")).lower() in ("1","true","t","yes","si","sì") else 0
+                  dt=parse_dt(get(row,"dtComu"))
+                  if sid<=0 or not fuel or price<=0:
+                      raise ValueError()
+                  key=(sid,fuel,selfv)
+                  old=latest.get(key)
+                  if old is None or dt>old[0]:
+                      latest[key]=(dt,price)
+                  if max_dt is None or dt>max_dt:
+                      max_dt=dt
+                  valid+=1
+              except Exception:
+                  bad+=1
+
+          by_station={}
+          for (sid,fuel,selfv),(dt,price) in latest.items():
+              by_station.setdefault(sid,{})[f"{fuel}|{selfv}"]=[
+                  dt.strftime("%Y-%m-%dT%H:%M:%S"), price
+              ]
+
+          changed=created=missing=0
+          for sid,current in by_station.items():
+              bucket=f"{sid//1000:03d}"
+              path=ROOT/bucket/f"{sid}.json.gz"
+              if path.exists():
+                  try:
+                      with gzip.open(path,"rt",encoding="utf-8") as z:
+                          obj=json.load(z)
+                  except Exception as e:
+                      print("ERRORE lettura",path,e)
+                      continue
+              else:
+                  # L'impianto può essere nuovo rispetto allo storico: creiamo comunque il file corrente.
+                  path.parent.mkdir(parents=True,exist_ok=True)
+                  obj={"id":sid,"prezzi":{}}
+                  created+=1
+
+              # Retrocompatibile: "prezzi" resta identico.
+              # "corrente" contiene SEMPRE l'ultima comunicazione presente nel CSV quotidiano,
+              # anche quando il prezzo è uguale a quello dei giorni precedenti.
+              if obj.get("corrente") != current:
+                  obj["corrente"]=current
+                  tmp=path.with_suffix(path.suffix+".tmp")
+                  with gzip.open(tmp,"wt",encoding="utf-8",compresslevel=9) as z:
+                      json.dump(obj,z,ensure_ascii=False,separators=(",",":"))
+                  tmp.replace(path)
+                  changed+=1
+
+          meta={
+              "source":"MIMIT prezzo_alle_8.csv",
+              "updated_at_utc":datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "max_dt_comu":max_dt.strftime("%Y-%m-%dT%H:%M:%S") if max_dt else None,
+              "rows_valid":valid,
+              "rows_bad":bad,
+              "stations":len(by_station),
+              "files_changed":changed,
+              "files_created":created
+          }
+          Path("data/corrente_manifest.json").write_text(
+              json.dumps(meta,ensure_ascii=False,separators=(",",":")),
+              encoding="utf-8"
+          )
+
+          print(json.dumps(meta,indent=2,ensure_ascii=False))
+          PY
+
+      - name: Commit dataset corrente
+        shell: bash
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/prezzi data/corrente_manifest.json
+          if git diff --cached --quiet; then
+            echo "Nessuna modifica."
+            exit 0
+          fi
+          git commit -m "Aggiorna prezzi MIMIT correnti"
+          git push origin gh-pages
