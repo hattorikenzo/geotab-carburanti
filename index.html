@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v50 stabile multi-database Dacia caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v51 litri + percentuale carburante caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -400,6 +400,29 @@
             }
 
             const FUEL_VOLUME_DIAGNOSTIC_ID="DiagnosticFuelUnitsId";
+            const FUEL_PERCENT_DIAGNOSTIC_ID="DiagnosticFuelLevelId";
+
+            async function fuelPercentRiseFromMeasuredStatus(f,deviceId){
+             let fillDate=f.dateTime||f.date||f.timestamp;
+             if(!fillDate)return null;
+             let base=new Date(fillDate);
+             let from=new Date(base.getTime()-30*60*1000);
+             let to=new Date(base.getTime()+90*60*1000);
+             let rows=await statusWindow(deviceId,FUEL_PERCENT_DIAGNOSTIC_ID,from,to).catch(()=>[]);
+             let s=realSamples(rows).sort((a,b)=>new Date(a.date)-new Date(b.date));
+             if(s.length<2)return null;
+             let fillMs=base.getTime();
+             let before=s.filter(x=>new Date(x.date).getTime()<=fillMs);
+             let after=s.filter(x=>new Date(x.date).getTime()>fillMs);
+             if(!before.length||!after.length)return null;
+             let pre=before[before.length-1];
+             let after30=after.filter(x=>new Date(x.date).getTime()<=fillMs+30*60*1000);
+             if(!after30.length)after30=after.slice(0,1);
+             let peak=after30.reduce((best,x)=>Number(x.data)>Number(best.data)?x:best,after30[0]);
+             let rise=Number(peak.data)-Number(pre.data);
+             if(!Number.isFinite(rise)||rise<=0)return null;
+             return {before:Number(pre.data),after:Number(peak.data),rise,date:peak.date,diagnosticId:FUEL_PERCENT_DIAGNOSTIC_ID};
+            }
 
             async function fuelRiseFromMeasuredStatus(f,deviceId){
              let fillDate=f.dateTime||f.date||f.timestamp;
@@ -455,10 +478,30 @@
              let fuel=normalizeFuel(f.productType)||vehicleFuel;
              let out={date:originalDate,originalDate,liters:0,fuel,coords:originalCoords,recovery:null};
 
+             // v52 DIAGNOSTICA: conserviamo i valori che Geotab restituisce direttamente
+             // nell'oggetto FillUp, senza usarli ancora per modificare costi/statistiche.
+             out.geotabFillUpVolume=Number.isFinite(Number(f.volume))?Number(f.volume):null;
+             out.geotabDerivedVolume=Number.isFinite(Number(f.derivedVolume))?Number(f.derivedVolume):null;
+             out.geotabTankCapacity=Number.isFinite(Number(f.tankCapacity))?Number(f.tankCapacity):null;
+             out.geotabTotalFuelUsed=Number.isFinite(Number(f.totalFuelUsed))?Number(f.totalFuelUsed):null;
+             out.geotabTankLevelExtrema=f.tankLevelExtrema??null;
+
              // UNICA FONTE DEI LITRI:
              // StatusData -> DiagnosticFuelUnitsId
              // "LIVELLO DEL CARBURANTE (VOLUME)" in litri.
-             let rise=await fuelRiseFromMeasuredStatus(f,deviceId);
+             let [rise,percentRise]=await Promise.all([
+              fuelRiseFromMeasuredStatus(f,deviceId),
+              fuelPercentRiseFromMeasuredStatus(f,deviceId)
+             ]);
+
+             if(percentRise){
+              out.fuelPercentBefore=Number(percentRise.before);
+              out.fuelPercentAfter=Number(percentRise.after);
+              out.fuelPercentDelta=Number(percentRise.rise);
+              out.fuelPercentConfirmed=Number(percentRise.rise)>=2;
+             }else{
+              out.fuelPercentUnavailable=true;
+             }
 
              if(rise&&Number(rise.rise)>0){
               out.rawFuelVolumeDelta=Number(rise.rise);
@@ -552,7 +595,17 @@
               let chosen=selectedPriceForItem(x);
               let price=chosen?`${dec(chosen.price,3)}<div class="cc-sub">${esc(dtLocal(chosen.date))}</div>`:`<span class="cc-warn">—</span>`;
               let cost=x.verified?money(x.cost):"—",tr=document.createElement("tr");
-              tr.innerHTML=`<td>${esc(dtLocal(x.date))}</td><td>${sup}</td><td>${fuelCell}</td><td class="cc-num">${price}</td><td>${esc(x.source||"—")}</td><td class="cc-num">${dec(x.liters||0,2)} L</td><td class="cc-num"><b>${cost}</b></td>`;
+              let percentInfo=Number.isFinite(x.fuelPercentDelta)?`<div class="cc-sub">${dec(x.fuelPercentBefore,1)}% → ${dec(x.fuelPercentAfter,1)}% (Δ +${dec(x.fuelPercentDelta,1)}%)${x.fuelPercentConfirmed?" · confermato":""}</div>`:"";
+              let diagParts=[];
+              if(Number.isFinite(x.geotabFillUpVolume))diagParts.push(`FillUp.volume: <b>${dec(x.geotabFillUpVolume,2)} L</b>`);
+              if(Number.isFinite(x.geotabDerivedVolume))diagParts.push(`derivedVolume: <b>${dec(x.geotabDerivedVolume,2)} L</b>`);
+              if(Number.isFinite(x.geotabTankCapacity))diagParts.push(`tankCapacity: ${dec(x.geotabTankCapacity,2)} L`);
+              if(Number.isFinite(x.geotabTotalFuelUsed))diagParts.push(`totalFuelUsed: ${dec(x.geotabTotalFuelUsed,2)} L`);
+              if(Number.isFinite(x.rawFuelVolumeDelta))diagParts.push(`DiagnosticFuelUnitsId Δ: <b>${dec(x.rawFuelVolumeDelta,2)} L</b>`);
+              let extremaText="";
+              if(x.geotabTankLevelExtrema!=null){try{extremaText=JSON.stringify(x.geotabTankLevelExtrema)}catch(e){extremaText=String(x.geotabTankLevelExtrema)}}
+              let diagInfo=`<details class="cc-sub" style="margin-top:6px;text-align:left"><summary>Diagnostica Geotab</summary><div style="margin-top:4px">${diagParts.join("<br>")||"Nessun valore FillUp aggiuntivo disponibile"}${extremaText?`<br>tankLevelExtrema: <span style="word-break:break-all">${esc(extremaText)}</span>`:""}</div></details>`;
+              tr.innerHTML=`<td>${esc(dtLocal(x.date))}</td><td>${sup}</td><td>${fuelCell}</td><td class="cc-num">${price}</td><td>${esc(x.source||"—")}</td><td class="cc-num">${dec(x.liters||0,2)} L${percentInfo}${diagInfo}</td><td class="cc-num"><b>${cost}</b></td>`;
               tb.appendChild(tr);
              }
 
