@@ -470,7 +470,7 @@
              };
             }
 
-            async function processFill(f,vehicleFuel,deviceId){
+            async function processFill(f,vehicleFuel,deviceId,vehicle){
              let originalCoords=fillCoords(f),originalDate=f.dateTime||f.date||f.timestamp;
              let fuel=normalizeFuel(f.productType)||vehicleFuel;
              let out={date:originalDate,originalDate,liters:0,fuel,coords:originalCoords,recovery:null};
@@ -480,6 +480,15 @@
              out.geotabFillUpVolume=Number.isFinite(Number(f.volume))?Number(f.volume):null;
              out.geotabDerivedVolume=Number.isFinite(Number(f.derivedVolume))?Number(f.derivedVolume):null;
              out.geotabTankCapacity=Number.isFinite(Number(f.tankCapacity?.volume))?Number(f.tankCapacity.volume):(Number.isFinite(Number(f.tankCapacity))?Number(f.tankCapacity):null);
+             out.geotabTankCapacitySource=(f.tankCapacity&&typeof f.tankCapacity==="object"&&f.tankCapacity.source)?String(f.tankCapacity.source):null;
+             // v56: capacità nominale nota, solo informativa; NON entra nel calcolo dei litri.
+             // Oioli, Elisa - Citroën C3 diesel, VIN VF72CBHYBJ4081269: serbatoio nominale 42 L.
+             const vehicleVin=vinOf(vehicle||{});
+             if(vehicleVin==="VF72CBHYBJ4081269"){
+              out.nominalTankCapacity=42;
+              out.nominalTankCapacityVehicle="Citroën C3 diesel";
+              out.nominalTankCapacitySource="specifica nominale veicolo";
+             }
              out.geotabTotalFuelUsed=Number.isFinite(Number(f.totalFuelUsed))?Number(f.totalFuelUsed):null;
              out.geotabTankLevelExtrema=f.tankLevelExtrema??null;
 
@@ -618,7 +627,14 @@
               let diagParts=[];
               if(Number.isFinite(x.geotabFillUpVolume))diagParts.push(`FillUp.volume: <b>${dec(x.geotabFillUpVolume,2)} L</b>`);
               if(Number.isFinite(x.geotabDerivedVolume))diagParts.push(`derivedVolume: <b>${dec(x.geotabDerivedVolume,2)} L</b>`);
-              if(Number.isFinite(x.geotabTankCapacity))diagParts.push(`tankCapacity: ${dec(x.geotabTankCapacity,2)} L`);
+              if(Number.isFinite(x.geotabTankCapacity)){
+               let capLabel=x.geotabTankCapacitySource==="EstimateFuelUnits"?"Capacità stimata Geotab":"Capacità serbatoio Geotab";
+               diagParts.push(`${capLabel}: ${dec(x.geotabTankCapacity,2)} L${x.geotabTankCapacitySource?` · Fonte: ${esc(x.geotabTankCapacitySource)}`:""}`);
+              }
+              if(Number.isFinite(x.nominalTankCapacity)){
+               diagParts.push(`Capacità nominale veicolo: <b>${dec(x.nominalTankCapacity,0)} L</b>${x.nominalTankCapacityVehicle?` · ${esc(x.nominalTankCapacityVehicle)}`:""}`);
+               diagParts.push(`<span class="cc-muted">La capacità nominale è solo informativa e non viene usata nel calcolo dei litri riforniti.</span>`);
+              }
               if(Number.isFinite(x.geotabTotalFuelUsed))diagParts.push(`totalFuelUsed: ${dec(x.geotabTotalFuelUsed,2)} L`);
               if(Number.isFinite(x.rawFuelVolumeDelta))diagParts.push(`DiagnosticFuelUnitsId Δ: <b>${dec(x.rawFuelVolumeDelta,2)} L</b>`);
               if(x.litersCalibrated){
@@ -870,7 +886,7 @@
               for(let i=0;i<fills.length;i++){
                $("status").textContent=`Analisi rifornimento ${i+1} di ${fills.length}: posizione FillUp / recupero rapido da aumento carburante…`;
                let item;
-               try{item=await processFill(fills[i],vf,vid)}
+               try{item=await processFill(fills[i],vf,vid,v)}
                catch(e){item={date:fills[i].dateTime||fills[i].date,liters:litersOf(fills[i]),fuel:vf,error:e.message}}
                out.push(item);
               }
