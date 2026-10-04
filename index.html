@@ -478,11 +478,11 @@
              let fuel=normalizeFuel(f.productType)||vehicleFuel;
              let out={date:originalDate,originalDate,liters:0,fuel,coords:originalCoords,recovery:null};
 
-             // v52 DIAGNOSTICA: conserviamo i valori che Geotab restituisce direttamente
+             // v53 CALIBRAZIONE PEUGEOT: conserviamo i valori che Geotab restituisce direttamente
              // nell'oggetto FillUp, senza usarli ancora per modificare costi/statistiche.
              out.geotabFillUpVolume=Number.isFinite(Number(f.volume))?Number(f.volume):null;
              out.geotabDerivedVolume=Number.isFinite(Number(f.derivedVolume))?Number(f.derivedVolume):null;
-             out.geotabTankCapacity=Number.isFinite(Number(f.tankCapacity))?Number(f.tankCapacity):null;
+             out.geotabTankCapacity=Number.isFinite(Number(f.tankCapacity?.volume))?Number(f.tankCapacity.volume):(Number.isFinite(Number(f.tankCapacity))?Number(f.tankCapacity):null);
              out.geotabTotalFuelUsed=Number.isFinite(Number(f.totalFuelUsed))?Number(f.totalFuelUsed):null;
              out.geotabTankLevelExtrema=f.tankLevelExtrema??null;
 
@@ -511,6 +511,21 @@
              }else{
               out.liters=0;
               out.litersUnavailable=true;
+             }
+
+             // v53: calibrazione empirica SOLO per Martons - Peugeot 2008 (device b1).
+             // Su 7 rifornimenti reali verificati, derivedVolume sovrastima in media
+             // di 3,04 L. Usiamo quindi il derivedVolume nativo Geotab meno l'offset.
+             // Gli altri veicoli continuano a usare invariata la logica precedente.
+             const PEUGEOT_2008_DEVICE_ID="b1";
+             const PEUGEOT_2008_FUEL_OFFSET_L=3.04;
+             if(String(deviceId)===PEUGEOT_2008_DEVICE_ID && Number.isFinite(out.geotabDerivedVolume) && out.geotabDerivedVolume>=5){
+              out.litersBeforeCalibration=out.liters;
+              out.liters=Math.max(0,out.geotabDerivedVolume-PEUGEOT_2008_FUEL_OFFSET_L);
+              out.litersCalibrated=true;
+              out.litersCalibrationOffset=PEUGEOT_2008_FUEL_OFFSET_L;
+              out.litersCalibrationSource="derivedVolume Geotab - offset Peugeot";
+              out.litersUnavailable=false;
              }
 
              let ns=null;
@@ -602,6 +617,11 @@
               if(Number.isFinite(x.geotabTankCapacity))diagParts.push(`tankCapacity: ${dec(x.geotabTankCapacity,2)} L`);
               if(Number.isFinite(x.geotabTotalFuelUsed))diagParts.push(`totalFuelUsed: ${dec(x.geotabTotalFuelUsed,2)} L`);
               if(Number.isFinite(x.rawFuelVolumeDelta))diagParts.push(`DiagnosticFuelUnitsId Δ: <b>${dec(x.rawFuelVolumeDelta,2)} L</b>`);
+              if(x.litersCalibrated){
+               diagParts.push(`Calibrazione Peugeot: <b>−${dec(x.litersCalibrationOffset,2)} L</b>`);
+               diagParts.push(`Litri utilizzati: <b>${dec(x.liters,2)} L</b>`);
+               diagParts.push(`Metodo: ${esc(x.litersCalibrationSource||"calibrazione Peugeot")}`);
+              }
               let extremaText="";
               if(x.geotabTankLevelExtrema!=null){try{extremaText=JSON.stringify(x.geotabTankLevelExtrema)}catch(e){extremaText=String(x.geotabTankLevelExtrema)}}
               let diagInfo=`<details class="cc-sub" style="margin-top:6px;text-align:left"><summary>Diagnostica Geotab</summary><div style="margin-top:4px">${diagParts.join("<br>")||"Nessun valore FillUp aggiuntivo disponibile"}${extremaText?`<br>tankLevelExtrema: <span style="word-break:break-all">${esc(extremaText)}</span>`:""}</div></details>`;
