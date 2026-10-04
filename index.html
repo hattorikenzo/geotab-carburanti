@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Costi Carburante v54</title><link rel="stylesheet" href="./costiCarburante.css?v=15"></head><body><div id="costi-carburante-root"><div class="cc-wrap">
+<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Costi Carburante v55</title><link rel="stylesheet" href="./costiCarburante.css?v=15"></head><body><div id="costi-carburante-root"><div class="cc-wrap">
 <h1>Costi Carburante</h1>
 <div class="cc-card">
 <div class="cc-topline">
@@ -429,13 +429,15 @@
              if(!fillDate)return null;
 
              let base=new Date(fillDate);
-             let from=new Date(base.getTime()-30*60*1000);
-             // v54 Z3050 (b1E8): questo veicolo può comunicare il nuovo livello
-             // solo alla successiva attività. Il caso 08/09 -> 09/09 richiede oltre 12 ore.
-             // Per gli altri veicoli conserviamo la finestra storica di 90 minuti.
-             const Z3050_DEVICE_ID="b1E8";
-             const isZ3050=String(deviceId)===Z3050_DEVICE_ID;
-             let to=new Date(base.getTime()+(isZ3050?24*60:90)*60*1000);
+             let fillMs=base.getTime();
+
+             // v55 REGOLA GENERALE DiagnosticFuelUnitsId:
+             // - base = minimo reale nei 15 minuti precedenti al FillUp
+             // - dopo = primo campione successivo con aumento >= 3 L
+             // - finestra di recupero fino a 24 ore per veicoli spenti/inattivi
+             // Non cerchiamo il massimo nelle 24 ore, per evitare oscillazioni successive.
+             let from=new Date(fillMs-15*60*1000);
+             let to=new Date(fillMs+24*60*60*1000);
 
              let rows=await statusWindow(
               deviceId,
@@ -447,30 +449,13 @@
              let s=realSamples(rows).sort((a,b)=>new Date(a.date)-new Date(b.date));
              if(s.length<2)return null;
 
-             let fillMs=base.getTime();
-
-             // v46: ricostruiamo l'intero aumento di livello vicino al FillUp.
-             // Il vecchio algoritmo cercava un singolo salto >=3 L e poteva
-             // scegliere campioni troppo lontani, sovrastimando i litri.
              let before=s.filter(x=>new Date(x.date).getTime()<=fillMs);
              let after=s.filter(x=>new Date(x.date).getTime()>fillMs);
              if(!before.length||!after.length)return null;
 
-             // Ultimo campione reale prima del FillUp.
-             let pre=before[before.length-1];
-
-             // Z3050: cerchiamo il PRIMO campione successivo con aumento >=3 L,
-             // fino a 24 ore. Evitiamo di usare un massimo molto successivo.
-             // Altri veicoli: conserviamo la ricerca del picco entro 30 minuti.
-             let peak=null;
-             if(isZ3050){
-              peak=after.find(x=>Number(x.data)-Number(pre.data)>=3)||null;
-              if(!peak)return null;
-             }else{
-              let after30=after.filter(x=>new Date(x.date).getTime()<=fillMs+30*60*1000);
-              if(!after30.length)after30=after.slice(0,1);
-              peak=after30.reduce((best,x)=>Number(x.data)>Number(best.data)?x:best,after30[0]);
-             }
+             let pre=before.reduce((min,x)=>Number(x.data)<Number(min.data)?x:min,before[0]);
+             let peak=after.find(x=>Number(x.data)-Number(pre.data)>=3)||null;
+             if(!peak)return null;
 
              let rise=Number(peak.data)-Number(pre.data);
              if(!Number.isFinite(rise)||rise<3)return null;
@@ -481,7 +466,7 @@
               rise,
               date:peak.date,
               diagnosticId:FUEL_VOLUME_DIAGNOSTIC_ID,
-              method:isZ3050?"Z3050: primo aumento DiagnosticFuelUnitsId entro 24h":"delta livello vicino al FillUp"
+              method:"minimo 15 min prima → primo aumento >=3 L entro 24h"
              };
             }
 
@@ -523,10 +508,10 @@
               out.fuelVolumeAfter=Number(rise.after);
               out.fuelVolumeRiseDate=rise.date||null;
               out.fuelVolumeMethod=rise.method||null;
-              // v54: per Z3050 manteniamo SEMPRE data/posizione del FillUp originale.
-              // Il nuovo livello può arrivare molte ore dopo (es. 08/09 -> 09/09).
-              out.date=String(deviceId)==="b1E8"?originalDate:(rise.date||originalDate);
-              if(String(deviceId)==="b1E8")out.z3050DirectDelta=true;
+              // v55: data e posizione restano SEMPRE quelle del FillUp originale.
+              // Il campione StatusData può arrivare anche molte ore dopo e serve solo ai litri.
+              out.date=originalDate;
+              out.directFuelUnitsDelta=true;
              }else{
               out.liters=0;
               out.litersUnavailable=true;
@@ -535,7 +520,7 @@
              // v53: calibrazione empirica SOLO per Martons - Peugeot 2008 (device b1).
              // Su 7 rifornimenti reali verificati, derivedVolume sovrastima in media
              // di 3,04 L. Usiamo quindi il derivedVolume nativo Geotab meno l'offset.
-             // Gli altri veicoli continuano a usare invariata la logica precedente.
+             // Gli altri veicoli usano la regola generale DiagnosticFuelUnitsId della v55.
              const PEUGEOT_2008_DEVICE_ID="b1";
              const PEUGEOT_2008_FUEL_OFFSET_L=3.04;
              if(String(deviceId)===PEUGEOT_2008_DEVICE_ID && Number.isFinite(out.geotabDerivedVolume) && out.geotabDerivedVolume>=5){
@@ -641,11 +626,11 @@
                diagParts.push(`Litri utilizzati: <b>${dec(x.liters,2)} L</b>`);
                diagParts.push(`Metodo: ${esc(x.litersCalibrationSource||"calibrazione Peugeot")}`);
               }
-              if(x.z3050DirectDelta){
-               if(Number.isFinite(x.fuelVolumeBefore)&&Number.isFinite(x.fuelVolumeAfter))diagParts.push(`Z3050 livello: <b>${dec(x.fuelVolumeBefore,2)} → ${dec(x.fuelVolumeAfter,2)} L</b>`);
-               diagParts.push(`Litri utilizzati Z3050: <b>${dec(x.liters,2)} L</b>`);
+              if(x.directFuelUnitsDelta){
+               if(Number.isFinite(x.fuelVolumeBefore)&&Number.isFinite(x.fuelVolumeAfter))diagParts.push(`Livello carburante: <b>${dec(x.fuelVolumeBefore,2)} → ${dec(x.fuelVolumeAfter,2)} L</b>`);
+               if(!x.litersCalibrated)diagParts.push(`Litri utilizzati: <b>${dec(x.liters,2)} L</b>`);
                if(x.fuelVolumeRiseDate)diagParts.push(`Aumento rilevato: ${esc(dtLocal(x.fuelVolumeRiseDate))}`);
-               diagParts.push(`Metodo: ${esc(x.fuelVolumeMethod||"delta diretto DiagnosticFuelUnitsId")}`);
+               diagParts.push(`Metodo FuelUnits: ${esc(x.fuelVolumeMethod||"delta DiagnosticFuelUnitsId")}`);
               }
               let extremaText="";
               if(x.geotabTankLevelExtrema!=null){try{extremaText=JSON.stringify(x.geotabTankLevelExtrema)}catch(e){extremaText=String(x.geotabTankLevelExtrema)}}
