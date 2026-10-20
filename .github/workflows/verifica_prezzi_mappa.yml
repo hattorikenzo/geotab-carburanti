@@ -1,0 +1,96 @@
+name: Verifica prezzi Mappa Carburanti (sola lettura)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verifica:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Scarica archivio pubblicato gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: published
+          persist-credentials: false
+
+      - name: Scarica CSV e confronta con MIMIT archiviato
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import csv, gzip, io, json, math, os, urllib.request
+          from collections import Counter, defaultdict
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+
+          URL = 'https://mappacarburanti.it/data/stazioni-italia.csv'
+          root = Path('published/data/prezzi')
+          if not root.is_dir():
+              raise SystemExit('ERRORE: cartella data/prezzi non presente nel ramo gh-pages')
+          req = urllib.request.Request(URL, headers={'User-Agent':'Mozilla/5.0 (Geotab price diagnostic)'})
+          with urllib.request.urlopen(req, timeout=90) as response:
+              raw = response.read(30 * 1024 * 1024 + 1)
+          if len(raw) > 30 * 1024 * 1024:
+              raise SystemExit('ERRORE: CSV superiore a 30 MB')
+          print('CSV scaricato:', len(raw), 'byte')
+          reader = csv.DictReader(io.StringIO(raw.decode('utf-8-sig')))
+          required = {'id_impianto','fuel_type','price','updated_at'}
+          if not required.issubset(set(reader.fieldnames or [])):
+              raise SystemExit(f'ERRORE: colonne mancanti: {required - set(reader.fieldnames or [])}')
+
+          def normfuel(v):
+              v = v.strip().lower()
+              aliases = {'diesel':'gasolio','gasolio':'gasolio','benzina':'benzina',
+                         'gpl':'gpl','metano':'metano','cng':'metano', 'lng':'gnl', 'gnl':'gnl'}
+              return aliases.get(v, v)
+
+          def dt(v):
+              try:
+                  d = datetime.fromisoformat(str(v).strip().replace('Z','+00:00'))
+                  if d.tzinfo is None: d = d.replace(tzinfo=timezone.utc)
+                  return d.astimezone(timezone.utc)
+              except (ValueError, TypeError):
+                  return None
+
+          rows = list(reader)
+          print('Record CSV:', len(rows))
+          if len(rows) < 1000: raise SystemExit('ERRORE: CSV troppo piccolo')
+          fuels = Counter(normfuel(r.get('fuel_type') or '') for r in rows)
+          print('Carburanti CSV:', dict(fuels.most_common()))
+          groups = defaultdict(list)
+          invalid = 0
+          latest = None
+          for r in rows:
+              try:
+                  sid = int(r['id_impianto'])
+                  fuel = normfuel(r['fuel_type'])
+                  price = float(r['price'].replace(',','.'))
+                  date = dt(r['updated_at'])
+                  if sid <= 0 or not fuel or not 0.1 <= price <= 10 or date is None:
+                      raise ValueError('Valore non valido')
+                  groups[(sid, fuel)].append((price, date))
+                  if latest is None or date > latest: latest = date
+              except (ValueError, TypeError, KeyError): invalid += 1
+          print('Righe non valide:', invalid)
+          print('Data comunicazione più recente nel CSV:', latest.isoformat() if latest else 'assente')
+          duplicates = sum(len(v)-1 for v in groups.values() if len(v)>1)
+          conflicts = sum(1 for v in groups.values() if len({round(x[0],3) for x in v})>1)
+          print('Righe duplicate per impianto/carburante:', duplicates)
+          print('Gruppi con prezzi differenti:', conflicts)
+
+          # Un solo file .gz per impianto: lettura in sola lettura e cache in memoria.
+          cache = {}
+          stats = Counter()
+          examples = defaultdict(list)
+          # Il confronto usa una tolleranza di 0,001 euro e una finestra di 48 ore.
+          # E' diagnostico: NON deduce automaticamente isSelf per dati più recenti.
+          for (sid, fuel), entries in groups.items():
+              if sid not in cache:
+                  p = root / f'{sid//1000:03d}' / f'{sid}.json.gz'
+                  try:
+                      with gzip.open(p, 'rt', encoding='utf-8') as f:
