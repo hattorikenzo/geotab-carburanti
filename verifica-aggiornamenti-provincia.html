@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Verifica aggiornamenti carburanti</title>
+<style>
+:root{font-family:Arial,Helvetica,sans-serif;color:#1c2938;background:#f3f6fa}*{box-sizing:border-box}body{margin:0}.wrap{max-width:1250px;margin:auto;padding:24px}h1{color:#123f73;margin:0 0 8px}p{color:#526176;line-height:1.5}.panel{background:white;border:1px solid #dfe6ed;border-radius:12px;padding:18px;margin:18px 0;box-shadow:0 2px 8px #152c4210}.controls{display:flex;flex-wrap:wrap;gap:12px;align-items:end}label{display:block;font-size:12px;font-weight:bold;margin-bottom:6px}select,button{padding:10px;border-radius:7px;border:1px solid #b8c6d5;background:white;font-size:14px}button{background:#14518a;color:white;border:0;cursor:pointer}button:hover{background:#0d3d6c}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.stat{background:#edf4fc;border-radius:8px;padding:15px}.stat strong{display:block;font-size:20px;margin:6px 0}.muted{color:#60758a;font-size:12px}.tablewrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:900px}th,td{padding:10px 9px;text-align:left;border-bottom:1px solid #e5eaf0;font-size:13px}th{background:#edf3fa;position:sticky;top:0}td.price{font-weight:bold;white-space:nowrap}.warn{color:#925b08}.error{color:#aa2424}#status{min-height:20px}a{color:#14518a}@media(max-width:600px){.wrap{padding:12px}.panel{padding:12px}}
+</style></head><body><main class="wrap">
+<h1>Verifica aggiornamenti carburanti</h1>
+<p>Comunicazioni più recenti dei distributori, confrontando MIMIT e Mappa Carburanti Italia. Le date si riferiscono alle <strong>comunicazioni dei prezzi</strong>, non al download del dataset.</p>
+<div class="panel controls"><div><label for="province">Provincia</label><select id="province"><option value="all">Tutte le province</option></select></div><div><label for="source">Fonte</label><select id="source"><option value="all">Entrambe</option><option value="MIMIT">MIMIT</option><option value="Mappa Carburanti Italia">Mappa Carburanti Italia</option></select></div><div><label for="fuel">Carburante</label><select id="fuel"><option value="all">Tutti</option><option value="Benzina">Benzina</option><option value="Gasolio">Gasolio</option><option value="GPL">GPL</option><option value="Metano">Metano</option></select></div><div><label for="limit">Risultati</label><select id="limit"><option>20</option><option>50</option><option>100</option><option>200</option></select></div><button id="reload">Aggiorna vista</button></div>
+<div class="stats" id="stats"></div>
+<section class="panel"><p id="status">Caricamento report…</p><div class="tablewrap"><table><thead><tr><th>#</th><th>ID MIMIT</th><th>Distributore / indirizzo</th><th>Carburante</th><th>Prezzo €/L</th><th>Modalità</th><th>Data comunicazione</th><th>Fonte</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+<p class="muted">Il filtro provincia agisce sui primi 200 record per fonte, non su tutti i distributori provinciali. Le province senza risultati in questa selezione non compaiono nel menu. Le comunicazioni MIMIT senza indicazione del fuso orario sono confrontate per data e ora riportate nell'archivio. I prezzi della fonte alternativa non certificano la modalità self/servito.</p>
+</main><script>
+let report=null;const $=id=>document.getElementById(id);const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function normalize(v){let s=String(v||'').toLowerCase();if(s.includes('gpl')||s.includes('lpg'))return 'GPL';if(s.includes('metano')||s.includes('cng'))return 'Metano';if(s.includes('gasolio')||s.includes('diesel'))return 'Gasolio';if(s.includes('benzina')||s.includes('gasoline'))return 'Benzina';return v}
+function dateKey(s){
+ let v=String(s||'').trim();
+ let m=v.match(/^(\d{2})\/(\d{2})\/(\d{4})[T ](\d{2}:\d{2}:\d{2})/);
+ return m?`${m[3]}-${m[2]}-${m[1]}T${m[4]}`:v.slice(0,19);
+}
+function provinceOf(r){
+ let s=String(r.provincia||'').trim().toUpperCase();
+ if(/^[A-Z]{2}$/.test(s))return s;
+ let match=String(r.indirizzo||'').match(/(?:—|-)\s*([A-Za-z]{2})\s*$/);
+ return match?match[1].toUpperCase():'';
+}
+function fillProvinces(){
+ const current=$('province').value;
+ const provinces=[...new Set([...(report.mimit||[]),...(report.mappa||[])].map(provinceOf).filter(Boolean))].sort();
+ $('province').innerHTML='<option value="all">Tutte le province</option>'+provinces.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join('');
+ if(provinces.includes(current))$('province').value=current;
+}
+function render(){if(!report)return;const source=$('source').value,fuel=$('fuel').value,province=$('province').value,limit=Number($('limit').value);let all=[...(report.mimit||[]),...(report.mappa||[])].filter(r=>(source==='all'||r.fonte===source)&&(fuel==='all'||normalize(r.carburante)===fuel)&&(province==='all'||provinceOf(r)===province)).sort((a,b)=>dateKey(b.data).localeCompare(dateKey(a.data))).slice(0,limit);
+$('stats').innerHTML=[['Ultima MIMIT',report.mimit?.[0]?.data||'Nessuna'],['Ultima Mappa',report.mappa?.[0]?.data||'Nessuna'],['Report generato (UTC)',report.generato_utc||'—']].map(([k,v])=>`<div class="stat"><span class="muted">${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('');
+$('rows').innerHTML=all.map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.id)}</td><td><strong>${esc(r.nome)}</strong><div class="muted">${esc(r.indirizzo)}</div></td><td>${esc(r.carburante)}</td><td class="price">€ ${Number(r.prezzo).toLocaleString('it-IT',{minimumFractionDigits:3,maximumFractionDigits:3})}</td><td class="${r.modalita==='non_verificata'?'warn':''}">${r.modalita==='1'?'Self':r.modalita==='0'?'Servito':esc(r.modalita)}</td><td>${esc(r.data)}</td><td>${esc(r.fonte)}</td></tr>`).join('')||'<tr><td colspan="8">Nessun risultato nei primi 200 record della fonte selezionata.</td></tr>';
+$('status').textContent=`${all.length} comunicazioni visualizzate. File esaminati: MIMIT ${report.statistiche?.mimit?.file_esaminati??'—'}, Mappa ${report.statistiche?.mappa?.file_esaminati??'—'}.`}
+async function load(){try{$('status').textContent='Caricamento report…';let r=await fetch('./data/ultime_comunicazioni.json?t='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status+'. Verifica che il workflow Deploy sito GitHub Pages generi il report.');report=await r.json();fillProvinces();render()}catch(e){$('status').textContent='Errore: '+e.message;$('status').className='error'}}
+$('reload').onclick=load;['province','source','fuel','limit'].forEach(id=>$(id).onchange=render);load();
+</script></body></html>
