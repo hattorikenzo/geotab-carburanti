@@ -12,85 +12,85 @@ concurrency:
 jobs:
   aggiorna:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
         with:
           ref: gh-pages
           fetch-depth: 0
-      - name: Scarica snapshot MIMIT
+      - name: Scarica snapshot MIMIT con fallback GitHub
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/mimit
-          download() {
-            local remote="$1" localname="$2" url tmp attempt
-            url="https://www.mimit.gov.it/images/exportCSV/${remote}"
-            tmp="/tmp/mimit/${localname}.part"
-            for attempt in 1 2 3 4 5; do
-              echo "Download ${remote}: tentativo ${attempt}/5"
-              rm -f "$tmp"
-              if curl --fail --location --silent --show-error \
-                --connect-timeout 90 --max-time 240 \
-                --retry 2 --retry-delay 10 --retry-all-errors \
-                --user-agent 'Mozilla/5.0 (compatible; MIMIT-dataset-updater/1.0)' \
-                "$url" --output "$tmp"; then
-                if python - "$tmp" <<'PY'
-          import csv,sys
-          from pathlib import Path
-          p=Path(sys.argv[1]); lines=p.read_text(encoding='utf-8-sig',errors='replace').splitlines()
-          header=next((i for i,s in enumerate(lines[:30]) if 'idimpianto' in s.lower()),None)
-          if header is None: raise SystemExit('Intestazione idImpianto assente')
-          delim='|' if lines[header].count('|')>=lines[header].count(';') else ';'
-          reader=csv.DictReader(lines[header:],delimiter=delim)
-          if not any(row.get('idImpianto') or row.get('idimpianto') for row in reader):
-              raise SystemExit('Nessun impianto valido nel CSV')
-          print(f'CSV valido: {p.stat().st_size} byte')
-          PY
-                then
-                  mv "$tmp" "/tmp/mimit/${localname}"
-                  return 0
-                fi
-              fi
-              echo "Tentativo ${attempt} fallito"
-              if (( attempt < 5 )); then sleep $((attempt * 20)); fi
-            done
-            echo "::error::Impossibile scaricare e validare ${remote}; dataset esistente invariato"
-            return 1
-          }
-          download prezzo_alle_8.csv prezzi.csv
-          download anagrafica_impianti_attivi.csv anagrafica.csv
-      - name: Merge storico permanente
-        shell: bash
-        run: |
           python - <<'PY'
-          import csv,gzip,json,math,tempfile,shutil
+          import csv, gzip, io, json, os, re, subprocess, urllib.request
+          from datetime import date, datetime
           from pathlib import Path
-          from datetime import datetime,timezone
-          ROOT=Path('data'); PR=ROOT/'prezzi'; GEO=ROOT/'geo'
-          PR.mkdir(parents=True,exist_ok=True); ROOT.mkdir(parents=True,exist_ok=True)
-          def setup(path):
-            lines=Path(path).read_text(encoding='utf-8-sig',errors='replace').splitlines()
-            for i,s in enumerate(lines[:30]):
-              if 'idimpianto' in s.lower(): return i,('|' if s.count('|')>=s.count(';') else ';')
-            raise RuntimeError('Header non trovato '+path)
-          def rows(path):
-            n,sep=setup(path)
-            with open(path,encoding='utf-8-sig',errors='replace',newline='') as f:
-              for _ in range(n): next(f,None)
-              yield from csv.DictReader(f,delimiter=sep)
-          def v(r,*names):
-            d={str(k).strip().lower():(x or '').strip() for k,x in r.items() if k is not None}
-            return next((d[n.lower()] for n in names if n.lower() in d),'')
-          def ndt(s):
-            for fmt in ('%d/%m/%Y %H:%M:%S','%d/%m/%Y %H:%M','%Y-%m-%d %H:%M:%S','%Y-%m-%dT%H:%M:%S'):
-              try:return datetime.strptime(s.strip(),fmt).strftime('%Y-%m-%dT%H:%M:%S')
-              except ValueError:pass
-            return s.strip()[:19].replace(' ','T')
-          def load(p):
-            if not p.exists(): return {}
-            with gzip.open(p,'rt',encoding='utf-8') as f:return json.load(f)
-          def save(p,o):
-            p.parent.mkdir(parents=True,exist_ok=True)
-            t=p.with_suffix('.json.gz.tmp')
-            with gzip.open(t,'wt',encoding='utf-8',compresslevel=9) as f:json.dump(o,f,ensure_ascii=False,separators=(',',':'))
+
+          root=Path('/tmp/mimit')
+          files={'prezzo_alle_8.csv':'prezzi.csv','anagrafica_impianti_attivi.csv':'anagrafica.csv'}
+          base='https://www.mimit.gov.it/images/exportCSV/'
+          mirror='https://raw.githubusercontent.com/LucaDDDD/benzina-data/main/data/'
+          def download(url, target, timeout=60):
+              subprocess.run(['curl','-4','-fLsS','--connect-timeout','12','--max-time',str(timeout),'--retry','2','--retry-delay','5','--retry-all-errors','-A','Mozilla/5.0',url,'-o',str(target)],check=True)
+          def check(path, kind):
+              if not path.exists() or path.stat().st_size<10000:
+                  raise ValueError('File assente o troppo piccolo: '+str(path))
+              with open(path,encoding='utf-8-sig',errors='replace',newline='') as f:
+                  head=[next(f,'') for _ in range(8)]
+              header=next((s for s in head if 'idimpianto' in s.lower()),'')
+              required=({'idimpianto','desccarburante','prezzo','isself','dtcomu'} if kind=='prezzo_alle_8.csv' else {'idimpianto','latitudine','longitudine'})
+              sep='|' if header.count('|')>=header.count(';') else ';'
+              columns={s.strip().lower() for s in next(csv.reader([header],delimiter=sep),[])}
+              if not required.issubset(columns):
+                  raise ValueError('Intestazione CSV non valida: '+kind)
+              return True
+          def extract_date(path):
+              with open(path,encoding='utf-8-sig',errors='replace') as f:
+                  first=f.readline()
+              m=re.search(r'(20\d{2})[-/](\d{1,2})[-/](\d{1,2})',first)
+              if m:return date(*map(int,m.groups()))
+              m=re.search(r'(\d{1,2})/(\d{1,2})/(20\d{2})',first)
+              if m:
+                  d,mo,y=map(int,m.groups());return date(y,mo,d)
+              return None
+          def cleanup():
+              for dst in files.values(): (root/dst).unlink(missing_ok=True)
+          source=None; extraction=None
+          try:
+              for src,dst in files.items():
+                  p=root/dst
+                  download(base+src,p,timeout=75)
+                  check(p,src)
+              ds=[extract_date(root/dst) for dst in files.values()]
+              if all(ds) and len(set(ds))!=1:raise ValueError('Date estrazione MIMIT differenti')
+              extraction=ds[0].isoformat() if all(ds) else None
+              source='MIMIT'
+          except Exception as exc:
+              print('Download diretto non riuscito:',exc,flush=True)
+              cleanup()
+              try:
+                  req=urllib.request.Request(mirror+'last_update.json',headers={'User-Agent':'geotab-carburanti/1.0'})
+                  with urllib.request.urlopen(req,timeout=25) as r: meta=json.load(r)
+                  d=date.fromisoformat(meta['ultima_estrazione'])
+                  age=(datetime.now().date()-d).days
+                  if not 0<=age<=7:raise ValueError(f'Archivio GitHub troppo vecchio: {d}, {age} giorni')
+                  for src,dst in files.items():
+                      gz=root/(dst+'.gz')
+                      url=f'{mirror}{d:%Y}/{d:%m}/{src[:-4]}-{d:%Y%m%d}.csv.gz'
+                      download(url,gz,timeout=90)
+                      with gzip.open(gz,'rb') as fi,open(root/dst,'wb') as fo:
+                          import shutil
+                          shutil.copyfileobj(fi,fo)
+                      gz.unlink()
+                      check(root/dst,src)
+                      actual=extract_date(root/dst)
+                      if actual and actual!=d:raise ValueError('Data interna CSV diversa dal manifest')
+                  source='GitHub benzina-data';extraction=d.isoformat()
+              except Exception as exc2:
+                  cleanup()
+                  raise SystemExit('Nessuna fonte valida: dataset esistente preservato. '+str(exc2))
+          (root/'source.json').write_text(json.dumps({'fonte':source,'data_estrazione':extraction},ensure_ascii=False))
+          print('Fonte:',source,'Estrazione:',extraction,flush=True)
+          PY
+      - name: Merge storico permanente
