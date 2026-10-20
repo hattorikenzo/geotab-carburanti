@@ -3,21 +3,13 @@ name: Deploy sito GitHub Pages
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - "*.html"
-      - ".github/scripts/crea_report_aggiornamenti.py"
-      - "*.js"
-      - "*.css"
-      - ".github/workflows/deploy_site.yml"
-  workflow_run:
-    workflows:
-      - "Aggiorna prezzi MIMIT correnti"
-    types:
-      - completed
-    branches:
-      - main
+      - '*.html'
+      - '*.js'
+      - '*.css'
+      - '.github/scripts/crea_report_aggiornamenti.py'
+      - '.github/workflows/deploy_site.yml'
 
 permissions:
   contents: read
@@ -30,8 +22,8 @@ concurrency:
 
 jobs:
   build:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -45,24 +37,10 @@ jobs:
           ref: gh-pages
           path: dataset
 
-      - name: Verifica file Add-In
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s main/index.html
-          test -s main/costiCarburante.css
-          echo "OK: HTML e CSS presenti"
-          if [ -s main/costiCarburante.js ]; then
-            echo "INFO: JS esterno presente"
-          else
-            echo "INFO: add-in standalone"
-          fi
-
       - name: Prepara sito
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf site
           mkdir -p site
           test -d dataset/data
           cp -a dataset/data site/data
@@ -71,54 +49,48 @@ jobs:
           if [ -f main/costiCarburante.js ]; then
             cp main/costiCarburante.js site/costiCarburante.js
           fi
-          find main -maxdepth 1 -type f -name '*.html' ! -name 'index.html' -exec cp {} site/ \;
+          find main -maxdepth 1 -type f -name '*.html' ! -name 'index.html' -exec cp '{}' site/ \;
+          find main -maxdepth 1 -type f -name '*.css' ! -name 'costiCarburante.css' -exec cp '{}' site/ \;
+          find main -maxdepth 1 -type f -name '*.js' ! -name 'costiCarburante.js' -exec cp '{}' site/ \;
           touch site/.nojekyll
 
-      - name: Genera report ultime comunicazioni
+      - name: Crea report ultime comunicazioni
         shell: bash
         run: |
           set -euo pipefail
+          test -s main/.github/scripts/crea_report_aggiornamenti.py
           python3 main/.github/scripts/crea_report_aggiornamenti.py
 
-      - name: Verifica sito e dataset
+      - name: Verifica sito prima del deploy
         shell: bash
         run: |
-          set -euo pipefail
-          test -s site/index.html
-          test -s site/costiCarburante.css
-          grep -q 'costiCarburante.css' site/index.html
-          grep -q 'window.geotab.addin.costiCarburante' site/index.html
-          test -f site/data/manifest.json
-          test -f site/data/prezzi/048/48907.json.gz
-          test -s site/data/ultimo_aggiornamento_mappa.json
-          test -d site/data/prezzi_mappa
-          test -s site/data/ultime_comunicazioni.json
-          test -s site/verifica-aggiornamenti.html
-          echo "OK: prezzi MIMIT e prezzi Mappa Carburanti presenti"
-          echo "Manifest Mappa Carburanti:"
-          cat site/data/ultimo_aggiornamento_mappa.json
-          echo
-          echo "Esempio file prezzi alternativi:"
-          find site/data/prezzi_mappa -type f -name '*.json.gz' -print -quit
-          echo "File di primo livello:"
-          find site -maxdepth 1 -type f -printf '%f\n' | sort
-
-      - name: Configura Pages
-        uses: actions/configure-pages@v5
-
-      - name: Carica artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-  deploy:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Pubblica
-        id: deployment
-        uses: actions/deploy-pages@v4
+          set -uo pipefail
+          ERRORI=0
+          verifica_file() {
+            if [ -s "$1" ]; then
+              echo "OK: $1"
+            else
+              echo "::error::File mancante o vuoto: $1"
+              ERRORI=$((ERRORI + 1))
+            fi
+          }
+          verifica_cartella() {
+            if [ -d "$1" ]; then
+              echo "OK: $1"
+            else
+              echo "::error::Cartella mancante: $1"
+              ERRORI=$((ERRORI + 1))
+            fi
+          }
+          verifica_testo() {
+            if [ -f "$1" ] && grep -Fq "$2" "$1"; then
+              echo "OK: contenuto '$2' in $1"
+            else
+              echo "::error::Contenuto '$2' non trovato in $1"
+              ERRORI=$((ERRORI + 1))
+            fi
+          }
+          verifica_file site/index.html
+          verifica_file site/costiCarburante.css
+          verifica_testo site/index.html 'costiCarburante.css'
+          verifica_testo site/index.html 'window.geotab.addin.costiCarburante'
