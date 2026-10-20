@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - "*.html"
+      - ".github/scripts/crea_report_aggiornamenti.py"
       - "*.js"
       - "*.css"
       - ".github/workflows/deploy_site.yml"
@@ -73,6 +74,12 @@ jobs:
           find main -maxdepth 1 -type f -name '*.html' ! -name 'index.html' -exec cp {} site/ \;
           touch site/.nojekyll
 
+      - name: Genera report ultime comunicazioni
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 main/.github/scripts/crea_report_aggiornamenti.py
+
       - name: Verifica sito e dataset
         shell: bash
         run: |
@@ -85,6 +92,8 @@ jobs:
           test -f site/data/prezzi/048/48907.json.gz
           test -s site/data/ultimo_aggiornamento_mappa.json
           test -d site/data/prezzi_mappa
+          test -s site/data/ultime_comunicazioni.json
+          test -s site/verifica-aggiornamenti.html
           echo "OK: prezzi MIMIT e prezzi Mappa Carburanti presenti"
           echo "Manifest Mappa Carburanti:"
           cat site/data/ultimo_aggiornamento_mappa.json
