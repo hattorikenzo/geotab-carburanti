@@ -27,22 +27,41 @@ def download(url, dest, timeout=100):
                     "-A", "Mozilla/5.0", url, "-o", str(dest)], check=True)
 
 def read_csv(path, mandatory):
+    # I CSV MIMIT possono avere righe con separatori extra in campi testuali.
+    # Le righe malformate vengono scartate e conteggiate, non provocano AttributeError.
     with path.open(encoding="utf-8-sig", errors="replace", newline="") as f:
-        lines = f.readlines()
-    index = next((i for i, s in enumerate(lines[:12]) if "idimpianto" in s.lower()), None)
-    if index is None:
-        raise ValueError(f"Intestazione idImpianto mancante: {path}")
-    header = lines[index]
-    sep = ";" if header.count(";") >= header.count("|") else "|"
-    reader = csv.DictReader(lines[index:], delimiter=sep)
-    fields = {x.strip().lower() for x in (reader.fieldnames or [])}
-    if not set(mandatory).issubset(fields):
-        raise ValueError(f"Colonne mancanti in {path}: {set(mandatory)-fields}")
-    rows = [{(k or "").strip().lower(): (v or "").strip() for k,v in row.items()}
-            for row in reader if row.get(reader.fieldnames[0])]
-    if len(rows) < 100:
-        raise ValueError(f"CSV troppo piccolo: {path}")
-    return rows, lines[0]
+        for _ in range(12):
+            line = f.readline()
+            if "idimpianto" in line.lower():
+                header = line
+                break
+        else:
+            raise ValueError(f"Intestazione idImpianto mancante: {path}")
+        sep = ";" if header.count(";") >= header.count("|") else "|"
+        headers = next(csv.reader([header], delimiter=sep))
+        fields = [h.strip().lower() for h in headers]
+        if not set(mandatory).issubset(fields):
+            raise ValueError(f"Colonne mancanti in {path}: {set(mandatory)-set(fields)}")
+        # Gestisce anche le righe con un campo extra: il parser non deve
+        # interpretare una lista come stringa, né inventare una colonna.
+        reader = csv.reader(f, delimiter=sep)
+        rows = []
+        malformed = 0
+        for values in reader:
+            if len(values) != len(fields):
+                malformed += 1
+                continue
+            row = dict(zip(fields, (v.strip() for v in values)))
+            if row.get("idimpianto"):
+                rows.append(row)
+        print(f"CSV {path.name}: {len(rows)} righe valide, {malformed} righe scartate", flush=True)
+        if len(rows) < 100:
+            raise ValueError(f"CSV troppo piccolo o malformato: {path}")
+        if malformed > max(100, len(rows)//10):
+            raise ValueError(f"Troppe righe CSV malformate: {path} ({malformed})")
+    with path.open(encoding="utf-8-sig", errors="replace") as f:
+        first = f.readline()
+    return rows, first
 
 def extraction_day(line):
     m = re.search(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", line)
