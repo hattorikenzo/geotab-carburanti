@@ -2,7 +2,9 @@ name: Aggiorna prezzi MIMIT
 on:
   workflow_dispatch:
   schedule:
-    - cron: '37 7 * * *'
+    # Ore 09:37 e 17:37 durante l'ora legale italiana
+    # Ore 08:37 e 16:37 durante l'ora solare italiana
+    - cron: '37 7,15 * * *'
 permissions:
   contents: write
   actions: write
