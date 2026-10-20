@@ -1,83 +1,28 @@
-name: Aggiorna prezzi MIMIT correnti
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "15 7 * * *"
-
-permissions:
-  contents: write
-
-concurrency:
-  group: aggiorna-mimit-corrente
-  cancel-in-progress: false
-
-jobs:
-  update:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout dataset gh-pages
-        uses: actions/checkout@v4
-        with:
-          ref: gh-pages
-          fetch-depth: 0
-
-      - name: Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Scarica prezzi MIMIT o fallback verificato
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PYCODE'
-          import csv, gzip, json, shutil, subprocess, urllib.request
-          from datetime import date
-          from pathlib import Path
-
-          dest = Path('/tmp/prezzo_alle_8.csv')
-          mirror = 'https://raw.githubusercontent.com/LucaDDDD/benzina-data/main/data/'
-          dest.unlink(missing_ok=True)
-
-          def download(url, output):
-              subprocess.run(['curl', '-4', '-fLsS', '--connect-timeout', '12',
-                              '--max-time', '75', '--retry', '1', '--retry-delay', '5',
-                              '--user-agent', 'Mozilla/5.0', url, '-o', str(output)], check=True)
-
-          def validate(path):
-              if not path.is_file() or path.stat().st_size < 10000:
-                  raise ValueError('CSV assente o troppo piccolo')
-              with path.open(encoding='utf-8-sig', errors='replace') as f:
-                  head = [next(f, '') for _ in range(30)]
-              header = next((line for line in head if 'idimpianto' in line.lower()), '')
               sep = '|' if header.count('|') >= header.count(';') else ';'
-              columns = {c.strip().lower() for c in next(csv.reader([header], delimiter=sep), [])}
+              columns = {x.strip().lower() for x in next(csv.reader([header], delimiter=sep))}
               required = {'idimpianto', 'desccarburante', 'prezzo', 'isself', 'dtcomu'}
               if not required.issubset(columns):
-                  raise ValueError('Intestazione CSV non valida: ' + str(columns))
+                  raise ValueError(f'Intestazione non valida: {columns}')
+              return sep, header
 
           source = None
           extraction = None
           try:
-              print('Tentativo download diretto MIMIT', flush=True)
+              print('Scaricamento fonte ufficiale MIMIT...', flush=True)
               download('https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv', dest)
               validate(dest)
               source = 'MIMIT'
-          except Exception as error:
-              print('MIMIT non raggiungibile:', error, flush=True)
+          except Exception as err:
+              print('Fonte ufficiale non disponibile:', err, flush=True)
               dest.unlink(missing_ok=True)
               try:
-                  print('Attivo fallback GitHub', flush=True)
-                  request = urllib.request.Request(mirror + 'last_update.json',
-                                                   headers={'User-Agent': 'Mozilla/5.0'})
-                  with urllib.request.urlopen(request, timeout=20) as response:
+                  request = urllib.request.Request(mirror + 'last_update.json', headers={'User-Agent': 'Mozilla/5.0'})
+                  with urllib.request.urlopen(request, timeout=15) as response:
                       metadata = json.load(response)
                   d = date.fromisoformat(metadata['ultima_estrazione'])
-                  age = (date.today() - d).days
+                  age = (datetime.now().astimezone().date() - d).days
                   if not 0 <= age <= 7:
-                      raise ValueError(f'Fallback non recente: {d}, {age} giorni')
+                      raise ValueError(f'Fallback non recente: {d} ({age} giorni)')
                   archive = Path('/tmp/prezzo_alle_8.csv.gz')
                   url = f'{mirror}{d:%Y}/{d:%m}/prezzo_alle_8-{d:%Y%m%d}.csv.gz'
                   download(url, archive)
@@ -87,10 +32,76 @@ jobs:
                   archive.unlink(missing_ok=True)
                   source = 'GitHub benzina-data'
                   extraction = d.isoformat()
-              except Exception as fallback_error:
+              except Exception as fallback_err:
                   dest.unlink(missing_ok=True)
-                  raise SystemExit('Nessuna fonte valida: storico lasciato invariato. ' + str(fallback_error))
-          print('Fonte:', source, 'Estrazione:', extraction or 'non verificata', flush=True)
+                  raise SystemExit(f'Nessuna fonte valida: nessun dato modificato. {fallback_err}')
+
+          Path('/tmp/mimit_source.json').write_text(json.dumps({
+              'source': source, 'extraction': extraction
+          }), encoding='utf-8')
+          print(f'Fonte valida: {source}; estrazione: {extraction or "non dichiarata"}', flush=True)
           PYCODE
 
-      - name: Aggiorna storico nei gzip senza cancellare dati
+      - name: Archivia snapshot giornaliero senza cancellare storico
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PYCODE'
+          import csv
+          import gzip
+          import hashlib
+          import io
+          import json
+          import os
+          from datetime import date, datetime, timezone
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+
+          source = Path('/tmp/prezzo_alle_8.csv')
+          info = json.loads(Path('/tmp/mimit_source.json').read_text(encoding='utf-8'))
+          now = datetime.now(timezone.utc)
+          today_it = now.astimezone(ZoneInfo('Europe/Rome')).date()
+          extraction = date.fromisoformat(info['extraction']) if info['extraction'] else today_it
+          if extraction > today_it:
+              raise SystemExit('Data estrazione futura: archivio invariato')
+
+          # Il nome riflette la data di estrazione quando fornita dalla fonte.
+          target = Path('mimit_snapshots') / f'{extraction:%Y}' / f'{extraction:%m}' / f'prezzo_alle_8-{extraction:%Y%m%d}.csv.gz'
+          target.parent.mkdir(parents=True, exist_ok=True)
+          payload = source.read_bytes()
+          new_hash = hashlib.sha256(payload).hexdigest()
+
+          # Non sostituire snapshot già salvati: sono storici immutabili.
+          if target.exists():
+              with gzip.open(target, 'rb') as f:
+                  old_hash = hashlib.sha256(f.read()).hexdigest()
+              if old_hash == new_hash:
+                  print('Snapshot già presente e identico:', target)
+              else:
+                  print('Snapshot esistente differente: preservato senza sovrascrittura:', target)
+                  # Variante con hash per conservare entrambe le versioni.
+                  target = target.with_name(target.name.replace('.csv.gz', f'-{new_hash[:12]}.csv.gz'))
+                  if target.exists():
+                      print('Anche questa versione è già archiviata:', target)
+                      raise SystemExit(0)
+
+          # Compressione deterministica; il contenuto originale del CSV resta invariato.
+          with target.open('wb') as out:
+              with gzip.GzipFile(fileobj=out, mode='wb', filename='', mtime=0, compresslevel=9) as gz:
+                  gz.write(payload)
+          print('Snapshot salvato:', target, 'byte CSV:', len(payload), 'sha256:', new_hash)
+          PYCODE
+
+      - name: Commit e push degli snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- mimit_snapshots/
+          if git diff --cached --quiet; then
+            echo 'Nessuna modifica da pubblicare.'
+            exit 0
+          fi
+          git commit -m 'Aggiorna snapshot giornalieri prezzi MIMIT'
+          git push origin HEAD:gh-pages
