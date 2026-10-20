@@ -1,0 +1,65 @@
+name: Test CSV Mappa Carburanti Italia
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verifica:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Scarica CSV e verifica formato
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://mappacarburanti.it/data/stazioni-italia.csv'
+          echo "Controllo: $URL"
+          if ! curl -fLsS --connect-timeout 15 --max-time 90 --retry 2 --retry-delay 3 \
+            -H 'Accept: text/csv,*/*' -A 'Mozilla/5.0' \
+            -D /tmp/mappa_headers.txt -o /tmp/stazioni-italia.csv "$URL"; then
+            echo 'ERRORE: impossibile scaricare il CSV. Nessun dato modificato.'
+            exit 1
+          fi
+          echo '=== HTTP headers ==='
+          grep -Ei '^(HTTP/|content-type:|content-length:|last-modified:|location:)' /tmp/mappa_headers.txt || true
+          python - <<'PY'
+          import csv
+          import re
+          from collections import Counter
+          from pathlib import Path
+          p=Path('/tmp/stazioni-italia.csv')
+          raw=p.read_bytes()
+          print('Dimensione (byte):',len(raw))
+          if len(raw)<1000: raise SystemExit('File troppo piccolo per un CSV nazionale')
+          sample=raw[:5000].decode('utf-8-sig',errors='replace')
+          if '<html' in sample.lower() or '<!doctype' in sample.lower():
+              raise SystemExit('Il server ha restituito HTML, non un CSV')
+          print('Prime 3 righe (max 300 caratteri):')
+          for line in sample.splitlines()[:3]: print(repr(line[:300]))
+          try: delimiter=csv.Sniffer().sniff(sample,delimiters=';|,\t').delimiter
+          except csv.Error: delimiter=';'
+          print('Separatore rilevato:',repr(delimiter))
+          with p.open(encoding='utf-8-sig',errors='replace',newline='') as f:
+              reader=csv.DictReader(f,delimiter=delimiter)
+              fields=reader.fieldnames or []
+              print('Colonne:',fields)
+              names={str(x).strip().lower() for x in fields}
+              required={'idimpianto','desccarburante','prezzo','isself','dtcomu'}
+              print('Compatibilità diretta MIMIT:', 'SI' if required.issubset(names) else 'NO')
+              print('Colonne MIMIT mancanti:',sorted(required-names))
+              count=0
+              date_columns=[x for x in fields if re.search(r'data|date|dtcomu|aggiorn|updated|timestamp',str(x),re.I)]
+              recent={k:[] for k in date_columns}
+              for row in reader:
+                  count+=1
+                  for key in date_columns:
+                      v=str(row.get(key) or '').strip()
+                      if v and (not recent[key] or v>recent[key][0]): recent[key]=[v]
+              print('Numero record:',count)
+              print('Colonne data e valori massimi lessicografici (non necessariamente cronologici):',recent)
+              if count<1000: raise SystemExit('Troppo pochi record: possibile dataset incompleto')
+          print('TEST COMPLETATO: nessun file del repository modificato.')
+          PY
