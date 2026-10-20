@@ -1,95 +1,108 @@
-name: Aggiorna prezzi MIMIT correnti
-on:
-  workflow_dispatch:
-  schedule:
-    # Ogni giorno alle 09:15 italiane circa (07:15 UTC; in inverno 08:15 locali).
-    - cron: "15 7 * * *"
 
-permissions:
-  contents: write
-
-concurrency:
-  group: aggiorna-mimit-corrente
-  cancel-in-progress: true
-
-jobs:
-  update:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout dataset gh-pages
-        uses: actions/checkout@v4
-        with:
-          ref: gh-pages
-          fetch-depth: 1
-
-      - name: Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Scarica prezzi correnti MIMIT
+      - name: Scarica prezzi correnti MIMIT con fallback
         shell: bash
         run: |
           set -euo pipefail
-          URL="https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
-          DEST="/tmp/prezzo_alle_8.csv"
-          for n in 1 2 3 4 5; do
-            echo "Tentativo $n di 5..."
-            rm -f "$DEST"
-            if curl --fail --location --silent --show-error \
-              --connect-timeout 30 --max-time 180 \
-              --retry 2 --retry-delay 10 \
-              --user-agent "Mozilla/5.0" \
-              "$URL" -o "$DEST"; then
-              if [ -s "$DEST" ] && grep -qi "idImpianto" "$DEST"; then
-                echo "CSV MIMIT scaricato correttamente."
-                ls -lh "$DEST"
-                head -n 3 "$DEST"
-                exit 0
-              fi
-              echo "CSV vuoto o formato non valido."
-            fi
-            rm -f "$DEST"
-            if [ "$n" -lt 5 ]; then
-              echo "Nuovo tentativo tra 20 secondi..."
-              sleep 20
-            fi
-          done
-          echo "::error::Download MIMIT fallito dopo 5 tentativi."
-          exit 1
-
-      - name: Aggiorna blocco corrente nei gzip
-        shell: bash
-        run: |
           python - <<'PY'
-          import csv, gzip, io, json, re
-          from datetime import datetime
+          import csv
+          import gzip
+          import json
+          import shutil
+          import subprocess
+          import urllib.request
+          from datetime import date
           from pathlib import Path
 
-          CSV=Path("/tmp/prezzo_alle_8.csv")
-          ROOT=Path("data/prezzi")
+          DEST = Path("/tmp/prezzo_alle_8.csv")
+          MIMIT = "https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
+          MIRROR = "https://raw.githubusercontent.com/LucaDDDD/benzina-data/main/data/"
+          DEST.unlink(missing_ok=True)
 
-          def decode(data):
-              try: return data.decode("utf-8-sig")
-              except UnicodeDecodeError: return data.decode("latin-1")
+          def download(url, path):
+              subprocess.run([
+                  "curl", "-4", "-fLsS",
+                  "--connect-timeout", "12",
+                  "--max-time", "90",
+                  "--retry", "1",
+                  "--retry-delay", "5",
+                  "-A", "Mozilla/5.0",
+                  url, "-o", str(path)
+              ], check=True)
 
-          def clean(x):
-              return (x or "").strip().lstrip("\ufeff")
+          def validate(path):
+              if not path.exists() or path.stat().st_size < 10000:
+                  raise ValueError("CSV assente o troppo piccolo")
+              with path.open(
+                  encoding="utf-8-sig",
+                  errors="replace"
+              ) as f:
+                  lines = [next(f, "") for _ in range(30)]
+              header = next(
+                  (s for s in lines if "idimpianto" in s.lower()),
+                  ""
+              )
+              sep = "|" if header.count("|") >= header.count(";") else ";"
+              columns = {
+                  c.strip().lower()
+                  for c in next(csv.reader([header], delimiter=sep), [])
+              }
+              if not {
+                  "idimpianto", "desccarburante",
+                  "prezzo", "isself", "dtcomu"
+              }.issubset(columns):
+                  raise ValueError("Intestazione CSV non valida")
 
-          def parse_dt(x):
-              x=clean(x)
-              for f in ("%d/%m/%Y %H:%M:%S","%d/%m/%Y %H:%M",
-                        "%Y-%m-%d %H:%M:%S","%Y-%m-%d %H:%M",
-                        "%Y-%m-%dT%H:%M:%S"):
-                  try: return datetime.strptime(x,f)
-                  except ValueError: pass
-              return datetime.fromisoformat(x.replace("Z","+00:00")).replace(tzinfo=None)
+          try:
+              print("Tentativo download MIMIT...", flush=True)
+              download(MIMIT, DEST)
+              validate(DEST)
+              print("Download MIMIT riuscito", flush=True)
 
-          raw=CSV.read_bytes()
-          text=decode(raw)
-          lines=text.splitlines()
-          header_i=next((i for i,l in enumerate(lines[:30]) if "idimpianto" in l.lower()),None)
-          if header_i is None:
-              raise SystemExit("Header idImpianto non trovato nel CSV MIMIT")
+          except Exception as exc:
+              print("MIMIT non raggiungibile:", exc, flush=True)
+              DEST.unlink(missing_ok=True)
+              print("Attivazione fallback GitHub...", flush=True)
+
+              try:
+                  req = urllib.request.Request(
+                      MIRROR + "last_update.json",
+                      headers={"User-Agent": "Mozilla/5.0"}
+                  )
+                  with urllib.request.urlopen(req, timeout=25) as r:
+                      meta = json.load(r)
+
+                  d = date.fromisoformat(meta["ultima_estrazione"])
+                  age = (date.today() - d).days
+
+                  if not 0 <= age <= 7:
+                      raise ValueError(
+                          f"Archivio troppo vecchio: {d}"
+                      )
+
+                  url = (
+                      f"{MIRROR}{d:%Y}/{d:%m}/"
+                      f"prezzo_alle_8-{d:%Y%m%d}.csv.gz"
+                  )
+                  archive = Path("/tmp/prezzi_fallback.csv.gz")
+                  download(url, archive)
+
+                  with gzip.open(archive, "rb") as source:
+                      with DEST.open("wb") as target:
+                          shutil.copyfileobj(source, target)
+
+                  validate(DEST)
+                  archive.unlink(missing_ok=True)
+                  print(
+                      f"Fallback GitHub riuscito. "
+                      f"Estrazione: {d}",
+                      flush=True
+                  )
+
+              except Exception as fallback_error:
+                  DEST.unlink(missing_ok=True)
+                  raise SystemExit(
+                      "Nessuna fonte valida disponibile. "
+                      "Storico preservato. "
+                      + str(fallback_error)
+                  )
+          PY
