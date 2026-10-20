@@ -12,92 +12,85 @@ concurrency:
 jobs:
   aggiorna:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
         with:
           ref: gh-pages
           fetch-depth: 0
       - name: Scarica snapshot MIMIT
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/mimit
-          for spec in 'prezzo_alle_8.csv prezzi.csv' 'anagrafica_impianti_attivi.csv anagrafica.csv'; do
-            set -- $spec
-            curl -fL --connect-timeout 30 --max-time 300 --retry 8 --retry-delay 15 --retry-max-time 1800 --retry-all-errors -A 'Mozilla/5.0 geotab-carburanti/1.0' "https://www.mimit.gov.it/images/exportCSV/$1" -o "/tmp/mimit/$2"
-          done
+          download() {
+            local remote="$1" localname="$2" url tmp attempt
+            url="https://www.mimit.gov.it/images/exportCSV/${remote}"
+            tmp="/tmp/mimit/${localname}.part"
+            for attempt in 1 2 3 4 5; do
+              echo "Download ${remote}: tentativo ${attempt}/5"
+              rm -f "$tmp"
+              if curl --fail --location --silent --show-error \
+                --connect-timeout 90 --max-time 240 \
+                --retry 2 --retry-delay 10 --retry-all-errors \
+                --user-agent 'Mozilla/5.0 (compatible; MIMIT-dataset-updater/1.0)' \
+                "$url" --output "$tmp"; then
+                if python - "$tmp" <<'PY'
+          import csv,sys
+          from pathlib import Path
+          p=Path(sys.argv[1]); lines=p.read_text(encoding='utf-8-sig',errors='replace').splitlines()
+          header=next((i for i,s in enumerate(lines[:30]) if 'idimpianto' in s.lower()),None)
+          if header is None: raise SystemExit('Intestazione idImpianto assente')
+          delim='|' if lines[header].count('|')>=lines[header].count(';') else ';'
+          reader=csv.DictReader(lines[header:],delimiter=delim)
+          if not any(row.get('idImpianto') or row.get('idimpianto') for row in reader):
+              raise SystemExit('Nessun impianto valido nel CSV')
+          print(f'CSV valido: {p.stat().st_size} byte')
+          PY
+                then
+                  mv "$tmp" "/tmp/mimit/${localname}"
+                  return 0
+                fi
+              fi
+              echo "Tentativo ${attempt} fallito"
+              if (( attempt < 5 )); then sleep $((attempt * 20)); fi
+            done
+            echo "::error::Impossibile scaricare e validare ${remote}; dataset esistente invariato"
+            return 1
+          }
+          download prezzo_alle_8.csv prezzi.csv
+          download anagrafica_impianti_attivi.csv anagrafica.csv
       - name: Merge storico permanente
+        shell: bash
         run: |
           python - <<'PY'
-          import csv,gzip,json,math
+          import csv,gzip,json,math,tempfile,shutil
           from pathlib import Path
           from datetime import datetime,timezone
-          ROOT=Path('data'); PR=ROOT/'prezzi'; GEO=ROOT/'geo'; PR.mkdir(parents=True,exist_ok=True); GEO.mkdir(parents=True,exist_ok=True)
+          ROOT=Path('data'); PR=ROOT/'prezzi'; GEO=ROOT/'geo'
+          PR.mkdir(parents=True,exist_ok=True); ROOT.mkdir(parents=True,exist_ok=True)
           def setup(path):
             lines=Path(path).read_text(encoding='utf-8-sig',errors='replace').splitlines()
             for i,s in enumerate(lines[:30]):
               if 'idimpianto' in s.lower(): return i,('|' if s.count('|')>=s.count(';') else ';')
             raise RuntimeError('Header non trovato '+path)
           def rows(path):
-            n,sep=setup(path); f=open(path,encoding='utf-8-sig',errors='replace',newline='')
-            for _ in range(n): next(f,None)
-            yield from csv.DictReader(f,delimiter=sep)
+            n,sep=setup(path)
+            with open(path,encoding='utf-8-sig',errors='replace',newline='') as f:
+              for _ in range(n): next(f,None)
+              yield from csv.DictReader(f,delimiter=sep)
           def v(r,*names):
-            d={str(k).strip().lower():(x or '').strip() for k,x in r.items()}
+            d={str(k).strip().lower():(x or '').strip() for k,x in r.items() if k is not None}
             return next((d[n.lower()] for n in names if n.lower() in d),'')
           def ndt(s):
             for fmt in ('%d/%m/%Y %H:%M:%S','%d/%m/%Y %H:%M','%Y-%m-%d %H:%M:%S','%Y-%m-%dT%H:%M:%S'):
               try:return datetime.strptime(s.strip(),fmt).strftime('%Y-%m-%dT%H:%M:%S')
-              except:pass
+              except ValueError:pass
             return s.strip()[:19].replace(' ','T')
           def load(p):
             if not p.exists(): return {}
             with gzip.open(p,'rt',encoding='utf-8') as f:return json.load(f)
           def save(p,o):
-            p.parent.mkdir(parents=True,exist_ok=True); t=p.with_suffix('.json.gz.tmp')
+            p.parent.mkdir(parents=True,exist_ok=True)
+            t=p.with_suffix('.json.gz.tmp')
             with gzip.open(t,'wt',encoding='utf-8',compresslevel=9) as f:json.dump(o,f,ensure_ascii=False,separators=(',',':'))
-            t.replace(p)
-          incoming={}; total=bad=0; maxdt=''
-          for r in rows('/tmp/mimit/prezzi.csv'):
-            total+=1
-            try:
-              sid=int(v(r,'idImpianto')); fuel=v(r,'descCarburante'); price=float(v(r,'prezzo').replace(',','.')); selfv=v(r,'isSelf'); dt=ndt(v(r,'dtComu'))
-              if not fuel or not dt: raise ValueError()
-              incoming.setdefault(sid,{}).setdefault(f'{fuel}|{selfv}',[]).append([dt,price]); maxdt=max(maxdt,dt)
-            except: bad+=1
-          modified=added=0
-          for sid,groups in incoming.items():
-            p=PR/f'{sid//1000:03d}'/f'{sid}.json.gz'; o=load(p) or {'id':sid,'prezzi':{}}; changed=False
-            for key,recs in groups.items():
-              old=o.setdefault('prezzi',{}).get(key,[]); m={(str(x[0]),float(x[1])):[str(x[0]),float(x[1])] for x in old if len(x)>=2}; before=len(m)
-              for dt,price in recs:m[(dt,float(price))]=[dt,float(price)]
-              arr=sorted(m.values(),key=lambda x:(x[0],x[1])); added+=max(0,len(arr)-before)
-              if arr!=old:o['prezzi'][key]=arr;changed=True
-            if changed:save(p,o);modified+=1
-          for p in GEO.glob('*.json'):p.unlink()
-          cells={}; stations=discard=0
-          for r in rows('/tmp/mimit/anagrafica.csv'):
-            try:
-              sid=int(v(r,'idImpianto')); lat=float(v(r,'Latitudine').replace(',','.')); lon=float(v(r,'Longitudine').replace(',','.'))
-              if not(35<=lat<=48 and 6<=lon<=19):raise ValueError()
-              item=[sid,lat,lon,v(r,'Gestore'),v(r,'Bandiera'),v(r,'Tipo Impianto','TipoImpianto'),v(r,'Nome Impianto','NomeImpianto'),v(r,'Indirizzo'),v(r,'Comune'),v(r,'Provincia')]
-              cells.setdefault(f'{math.floor(lat/.05)}_{math.floor(lon/.05)}',[]).append(item);stations+=1
-            except:discard+=1
-          for k,a in cells.items():(GEO/f'{k}.json').write_text(json.dumps(a,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
-          mp=ROOT/'manifest.json'; manifest={}
-          if mp.exists():
-            try:manifest=json.loads(mp.read_text())
-            except:pass
-          manifest.update({'aggiornato_il':datetime.now(timezone.utc).isoformat(),'ultimo_dt_comu':maxdt,'impianti_attivi':stations,'celle_geo':len(cells),'raccolta_giornaliera_attiva':True})
-          mp.write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
-          print(json.dumps({'righe_csv_prezzi':total,'righe_scartate':bad,'file_prezzi_modificati':modified,'variazioni_aggiunte':added,'ultimo_dt_comu':maxdt,'impianti_attivi':stations,'celle_geo':len(cells),'impianti_scartati':discard},indent=2))
-          PY
-      - name: Commit dataset
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data
-          git diff --cached --quiet || (git commit -m "Aggiorna prezzi MIMIT $(date -u +%F)" && git push origin gh-pages)
-      - name: Avvia deploy Pages
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run deploy_site.yml --repo "$GITHUB_REPOSITORY" --ref main
