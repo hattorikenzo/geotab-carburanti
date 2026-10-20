@@ -3,7 +3,7 @@ name: Aggiorna prezzi MIMIT correnti
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 7 * * *"
+    - cron: '15 7 * * *'
 
 permissions:
   contents: write
@@ -26,71 +26,71 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
-      - name: Scarica e archivia CSV verificato
+      - name: Download e verifica fonte
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PYCODE'
-          import csv, gzip, hashlib, json, re, shutil, subprocess, urllib.request
-          from datetime import datetime, date, timezone
+          python -c '
+          import csv, gzip, json, subprocess, tempfile, urllib.request
+          from datetime import date, datetime, timezone
           from pathlib import Path
           from zoneinfo import ZoneInfo
-          
-          root = Path('mimit_snapshots')
-          root.mkdir(exist_ok=True)
-          tmp = Path('/tmp/mimit_current.csv')
-          agent = 'Mozilla/5.0 (compatible; GeotabMIMITArchive/1.0)'
-          
-          def fetch(url, dest):
-              subprocess.run(['curl', '-4', '-fLsS', '--connect-timeout', '8',
-                              '--max-time', '35', '--retry', '0', '-A', agent,
-                              '-o', str(dest), url], check=True, timeout=40)
-          
-          def inspect(path):
-              if not path.exists() or path.stat().st_size < 10000:
-                  raise ValueError('CSV mancante o troppo piccolo')
-              with path.open(encoding='utf-8-sig', errors='replace', newline='') as f:
-                  lines = [f.readline().strip() for _ in range(35)]
-              header = next((x for x in lines if 'idimpianto' in x.lower()), None)
+
+          dest = Path("/tmp/prezzo_alle_8.csv")
+          dest.unlink(missing_ok=True)
+          today = datetime.now(ZoneInfo("Europe/Rome")).date()
+
+          def fetch(url, output):
+              subprocess.run(["curl", "-4", "-fLsS", "--connect-timeout", "8", "--max-time", "35", "--retry", "0", "-A", "Mozilla/5.0", "-o", str(output), url], check=True, timeout=40)
+
+          def verify(path):
+              if not path.is_file() or path.stat().st_size < 10000:
+                  raise ValueError("CSV mancante o troppo piccolo")
+              with path.open(encoding="utf-8-sig", errors="replace") as f:
+                  first = [next(f, "") for _ in range(30)]
+              header = next((line for line in first if "idimpianto" in line.lower()), None)
               if not header:
-                  raise ValueError('Manca intestazione MIMIT')
-              sep = '|' if header.count('|') > header.count(';') else ';'
-              cols = {x.strip().lower() for x in next(csv.reader([header], delimiter=sep))}
-              needed = {'idimpianto','desccarburante','prezzo','isself','dtcomu'}
+                  raise ValueError("Intestazione idImpianto assente")
+              sep = "|" if header.count("|") > header.count(";") else ";"
+              cols = {c.strip().lower() for c in next(csv.reader([header], delimiter=sep))}
+              needed = {"idimpianto", "desccarburante", "prezzo", "isself", "dtcomu"}
               if not needed.issubset(cols):
-                  raise ValueError('Colonne MIMIT mancanti: ' + str(needed-cols))
-              first = '\n'.join(lines[:5])
-              m = re.search(r'Estrazione\s+del\s+(\d{4}-\d{2}-\d{2})', first, re.I)
-              return date.fromisoformat(m.group(1)) if m else None
-          
-          today = datetime.now(ZoneInfo('Europe/Rome')).date()
-          mirror = 'https://raw.githubusercontent.com/LucaDDDD/benzina-data/main/data/'
-          sources = [('MIMIT', 'https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv'),
-                     ('Mappa Carburanti', 'https://mappacarburanti.it/data/stazioni-italia.csv')]
+                  raise ValueError("Colonne incompatibili: " + str(cols))
+              return first
+
+          def extraction_from_header(lines):
+              import re
+              for line in lines[:10]:
+                  match = re.search(r"Estrazione\s+del\s+(\d{4}-\d{2}-\d{2})", line, re.I)
+                  if match:
+                      return date.fromisoformat(match.group(1))
+              return None
+
+          errors = []
           selected = None
-          for label, url in sources:
+          extraction = None
+          candidates = [
+              ("MIMIT", "https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"),
+              ("Mappa Carburanti", "https://mappacarburanti.it/data/stazioni-italia.csv"),
+          ]
+          for label, url in candidates:
               try:
-                  tmp.unlink(missing_ok=True)
-                  print('Tentativo:', label, flush=True)
-                  fetch(url, tmp)
-                  extraction = inspect(tmp)
-                  if extraction is None:
-                      raise ValueError('Data di estrazione non dichiarata nel CSV')
-                  if not 0 <= (today - extraction).days <= 7:
-                      raise ValueError('Estrazione troppo vecchia o futura: ' + str(extraction))
-                  selected = (label, extraction)
+                  print("Tentativo:", label, flush=True)
+                  dest.unlink(missing_ok=True)
+                  fetch(url, dest)
+                  lines = verify(dest)
+                  extracted = extraction_from_header(lines)
+                  if extracted is None:
+                      raise ValueError("Data di estrazione non verificabile nel CSV")
+                  age = (today - extracted).days
+                  if not 0 <= age <= 7:
+                      raise ValueError("Estrazione non recente: " + str(extracted))
+                  selected, extraction = label, extracted
                   break
               except Exception as exc:
-                  print('Fonte non utilizzabile:', label, str(exc), flush=True)
-                  tmp.unlink(missing_ok=True)
-          
+                  errors.append(label + ": " + str(exc))
+                  print("Fonte scartata:", errors[-1], flush=True)
+
           if selected is None:
-              try:
-                  req = urllib.request.Request(mirror + 'last_update.json', headers={'User-Agent': agent})
-                  with urllib.request.urlopen(req, timeout=15) as response:
-                      meta = json.load(response)
-                  extraction = date.fromisoformat(meta['ultima_estrazione'])
-                  if not 0 <= (today - extraction).days <= 7:
-                      raise ValueError('Fallback scaduto: ' + str(extraction))
