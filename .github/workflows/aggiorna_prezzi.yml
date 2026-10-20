@@ -1,9 +1,8 @@
-name: Aggiorna prezzi MIMIT
+name: Aggiorna prezzi MIMIT e Mappa Carburanti
 
 on:
   workflow_dispatch:
   schedule:
-    # UTC: 09:37 e 17:37 in ora legale; 08:37 e 16:37 in ora solare
     - cron: "37 7,15 * * *"
 
 permissions:
@@ -36,9 +35,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Scarica e integra i prezzi senza cancellare lo storico
+      - name: Aggiorna MIMIT (storico ufficiale)
+        id: mimit
+        continue-on-error: true
         working-directory: published
         run: python ../source/.github/scripts/aggiorna_prezzi.py
+
+      - name: Importa prezzi selezionati Mappa Carburanti (archivio separato)
+        id: mappa
+        continue-on-error: true
+        working-directory: published
+        run: python ../source/.github/scripts/importa_mappa_carburanti.py
+
+      - name: Verifica che almeno una fonte sia riuscita
+        if: steps.mimit.outcome != 'success' && steps.mappa.outcome != 'success'
+        run: |
+          echo "Entrambe le fonti non disponibili. Nessuna pubblicazione."
+          exit 1
 
       - name: Pubblica solo i file modificati
         working-directory: published
@@ -47,11 +60,11 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/prezzi data/ultimo_aggiornamento_prezzi.json
+          git add data/prezzi data/prezzi_mappa data/ultimo_aggiornamento_prezzi.json data/ultimo_aggiornamento_mappa.json
           if git diff --cached --quiet; then
             echo "Nessun aggiornamento da pubblicare"
             exit 0
           fi
-          git commit -m "Aggiorna prezzi MIMIT e conserva storico"
+          git commit -m "Aggiorna MIMIT e prezzi alternativi separati"
           git pull --rebase origin gh-pages
           git push origin HEAD:gh-pages
