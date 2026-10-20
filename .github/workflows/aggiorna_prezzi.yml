@@ -1,98 +1,57 @@
 name: Aggiorna prezzi MIMIT
+
 on:
   workflow_dispatch:
   schedule:
-    # Ore 09:37 e 17:37 durante l'ora legale italiana
-    # Ore 08:37 e 16:37 durante l'ora solare italiana
-    - cron: '37 7,15 * * *'
+    # UTC: 09:37 e 17:37 in ora legale; 08:37 e 16:37 in ora solare
+    - cron: "37 7,15 * * *"
+
 permissions:
   contents: write
-  actions: write
+
 concurrency:
-  group: aggiorna-prezzi-mimit
+  group: aggiorna-prezzi-mimit-gh-pages
   cancel-in-progress: false
+
 jobs:
   aggiorna:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout codice (main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: source
+
+      - name: Checkout dataset (gh-pages)
+        uses: actions/checkout@v4
         with:
           ref: gh-pages
+          path: published
           fetch-depth: 0
-      - name: Scarica snapshot MIMIT con fallback GitHub
+
+      - name: Configura Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Scarica e integra i prezzi senza cancellare lo storico
+        working-directory: published
+        run: python ../source/.github/scripts/aggiorna_prezzi.py
+
+      - name: Pubblica solo i file modificati
+        working-directory: published
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/mimit
-          python - <<'PY'
-          import csv, gzip, io, json, os, re, subprocess, urllib.request
-          from datetime import date, datetime
-          from pathlib import Path
-
-          root=Path('/tmp/mimit')
-          files={'prezzo_alle_8.csv':'prezzi.csv','anagrafica_impianti_attivi.csv':'anagrafica.csv'}
-          base='https://www.mimit.gov.it/images/exportCSV/'
-          mirror='https://raw.githubusercontent.com/LucaDDDD/benzina-data/main/data/'
-          def download(url, target, timeout=60):
-              subprocess.run(['curl','-4','-fLsS','--connect-timeout','12','--max-time',str(timeout),'--retry','2','--retry-delay','5','--retry-all-errors','-A','Mozilla/5.0',url,'-o',str(target)],check=True)
-          def check(path, kind):
-              if not path.exists() or path.stat().st_size<10000:
-                  raise ValueError('File assente o troppo piccolo: '+str(path))
-              with open(path,encoding='utf-8-sig',errors='replace',newline='') as f:
-                  head=[next(f,'') for _ in range(8)]
-              header=next((s for s in head if 'idimpianto' in s.lower()),'')
-              required=({'idimpianto','desccarburante','prezzo','isself','dtcomu'} if kind=='prezzo_alle_8.csv' else {'idimpianto','latitudine','longitudine'})
-              sep='|' if header.count('|')>=header.count(';') else ';'
-              columns={s.strip().lower() for s in next(csv.reader([header],delimiter=sep),[])}
-              if not required.issubset(columns):
-                  raise ValueError('Intestazione CSV non valida: '+kind)
-              return True
-          def extract_date(path):
-              with open(path,encoding='utf-8-sig',errors='replace') as f:
-                  first=f.readline()
-              m=re.search(r'(20\d{2})[-/](\d{1,2})[-/](\d{1,2})',first)
-              if m:return date(*map(int,m.groups()))
-              m=re.search(r'(\d{1,2})/(\d{1,2})/(20\d{2})',first)
-              if m:
-                  d,mo,y=map(int,m.groups());return date(y,mo,d)
-              return None
-          def cleanup():
-              for dst in files.values(): (root/dst).unlink(missing_ok=True)
-          source=None; extraction=None
-          try:
-              for src,dst in files.items():
-                  p=root/dst
-                  download(base+src,p,timeout=75)
-                  check(p,src)
-              ds=[extract_date(root/dst) for dst in files.values()]
-              if all(ds) and len(set(ds))!=1:raise ValueError('Date estrazione MIMIT differenti')
-              extraction=ds[0].isoformat() if all(ds) else None
-              source='MIMIT'
-          except Exception as exc:
-              print('Download diretto non riuscito:',exc,flush=True)
-              cleanup()
-              try:
-                  req=urllib.request.Request(mirror+'last_update.json',headers={'User-Agent':'geotab-carburanti/1.0'})
-                  with urllib.request.urlopen(req,timeout=25) as r: meta=json.load(r)
-                  d=date.fromisoformat(meta['ultima_estrazione'])
-                  age=(datetime.now().date()-d).days
-                  if not 0<=age<=7:raise ValueError(f'Archivio GitHub troppo vecchio: {d}, {age} giorni')
-                  for src,dst in files.items():
-                      gz=root/(dst+'.gz')
-                      url=f'{mirror}{d:%Y}/{d:%m}/{src[:-4]}-{d:%Y%m%d}.csv.gz'
-                      download(url,gz,timeout=90)
-                      with gzip.open(gz,'rb') as fi,open(root/dst,'wb') as fo:
-                          import shutil
-                          shutil.copyfileobj(fi,fo)
-                      gz.unlink()
-                      check(root/dst,src)
-                      actual=extract_date(root/dst)
-                      if actual and actual!=d:raise ValueError('Data interna CSV diversa dal manifest')
-                  source='GitHub benzina-data';extraction=d.isoformat()
-              except Exception as exc2:
-                  cleanup()
-                  raise SystemExit('Nessuna fonte valida: dataset esistente preservato. '+str(exc2))
-          (root/'source.json').write_text(json.dumps({'fonte':source,'data_estrazione':extraction},ensure_ascii=False))
-          print('Fonte:',source,'Estrazione:',extraction,flush=True)
-          PY
-      - name: Merge storico permanente
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/prezzi data/ultimo_aggiornamento_prezzi.json
+          if git diff --cached --quiet; then
+            echo "Nessun aggiornamento da pubblicare"
+            exit 0
+          fi
+          git commit -m "Aggiorna prezzi MIMIT e conserva storico"
+          git pull --rebase origin gh-pages
+          git push origin HEAD:gh-pages
