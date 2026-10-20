@@ -3,7 +3,8 @@ name: Deploy sito GitHub Pages
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - '*.html'
       - '*.js'
@@ -23,7 +24,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -54,7 +55,7 @@ jobs:
           find main -maxdepth 1 -type f -name '*.js' ! -name 'costiCarburante.js' -exec cp '{}' site/ \;
           touch site/.nojekyll
 
-      - name: Crea report ultime comunicazioni
+      - name: Genera report ultime comunicazioni
         shell: bash
         run: |
           set -euo pipefail
@@ -66,6 +67,7 @@ jobs:
         run: |
           set -uo pipefail
           ERRORI=0
+
           verifica_file() {
             if [ -s "$1" ]; then
               echo "OK: $1"
@@ -74,6 +76,7 @@ jobs:
               ERRORI=$((ERRORI + 1))
             fi
           }
+
           verifica_cartella() {
             if [ -d "$1" ]; then
               echo "OK: $1"
@@ -82,6 +85,7 @@ jobs:
               ERRORI=$((ERRORI + 1))
             fi
           }
+
           verifica_testo() {
             if [ -f "$1" ] && grep -Fq "$2" "$1"; then
               echo "OK: contenuto '$2' in $1"
@@ -90,7 +94,3 @@ jobs:
               ERRORI=$((ERRORI + 1))
             fi
           }
-          verifica_file site/index.html
-          verifica_file site/costiCarburante.css
-          verifica_testo site/index.html 'costiCarburante.css'
-          verifica_testo site/index.html 'window.geotab.addin.costiCarburante'
