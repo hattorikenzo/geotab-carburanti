@@ -1,12 +1,12 @@
 {
   "fonte": "Mappa Carburanti Italia",
   "url": "https://mappacarburanti.it/data/stazioni-italia.csv",
-  "data_massima_utc": "2026-10-17T06:06:13+00:00",
-  "aggiornato_utc": "2026-10-22T19:29:26.871959+00:00",
-  "righe_valide": 48276,
+  "data_massima_utc": "2026-10-21T06:01:59+00:00",
+  "aggiornato_utc": "2026-10-23T12:52:44.962074+00:00",
+  "righe_valide": 48254,
   "righe_non_valide": 0,
-  "impianti": 21517,
-  "file_modificati": 0,
+  "impianti": 21509,
+  "file_modificati": 18756,
   "modalita": "non_verificata",
   "nota": "Archivio separato: NON usato per sovrascrivere self/servito MIMIT"
 }
