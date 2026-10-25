@@ -101,32 +101,15 @@
             async function nearestStation(lat,lon){
              let cy=Math.floor(lat/GRID),cx=Math.floor(lon/GRID),all=[];
              await Promise.all(Array.from({length:9},(_,i)=>{let dy=Math.floor(i/3)-1,dx=i%3-1;return fetchJson(`${DATA_BASE}/geo/${cy+dy}_${cx+dx}.json`).then(a=>all.push(...a)).catch(()=>{})}));
-             let best=null;for(const s of all){let d=hav(lat,lon,Number(s[1]),Number(s[2]));if(!best||d<best.distance)best={raw:s,distance:d}}
+             let best=null;for(const s of all){let slat=Number(s[1]),slon=Number(s[2]);if(!Number.isFinite(slat)||!Number.isFinite(slon))continue;let d=hav(lat,lon,slat,slon);if(!best||d<best.distance)best={raw:s,distance:d}}
              return best&&best.distance<=MAX_STATION_METERS?best:null;
             }
         async function nearestStationConfirmedRefuel(lat,lon){
-         // Rifornimento già confermato dall'aumento del volume carburante:
-         // restituisce l'impianto MIMIT più vicino senza cutoff di 500 metri.
-         let cy=Math.floor(lat/GRID),cx=Math.floor(lon/GRID);
-         for(const radius of [1,2,3,5]){
-          let all=[],jobs=[];
-          for(let dy=-radius;dy<=radius;dy++){
-           for(let dx=-radius;dx<=radius;dx++){
-            jobs.push(fetchJson(`${DATA_BASE}/geo/${cy+dy}_${cx+dx}.json`).then(a=>all.push(...a)).catch(()=>{}));
-           }
-          }
-          await Promise.all(jobs);
-          let best=null;
-          for(const s of all){
-           let d=hav(lat,lon,Number(s[1]),Number(s[2]));
-           if(!best||d<best.distance)best={raw:s,distance:d};
-          }
-          if(best)return best;
-         }
-         return null;
+         // Mai associare un impianto distante solo perche' e' il primo disponibile.
+         return nearestStation(lat,lon);
         }
 
-            async function priceFromFile(url,fuel,fillDate,source,mode){
+async function priceFromFile(url,fuel,fillDate,source,mode){
              let o=await fetchGzip(url);
              let fillDay=localYmd(new Date(fillDate));
              let rows=[];
@@ -380,7 +363,7 @@
               for(const ign of candidates){
                let gps=await firstGpsAfter(deviceId,ign.date,8);
                if(!gps||gps.error)continue;
-               let station=await nearestStationConfirmedRefuel(gps.lat,gps.lon);
+               let station=await nearestStation(gps.lat,gps.lon);
                if(station){
                 result.ignition=ign;
                 result.gps=gps;
@@ -516,7 +499,7 @@
               }
               for(const r of gps){
                if(Number.isFinite(r.speed)&&r.speed<=1){
-                if(current.length&&r.t-current[current.length-1].t>120000)finishStop();
+                if(current.length&&r.t-current[current.length-1].t>5*60000)finishStop();
                 current.push(r);
                }else finishStop();
               }
@@ -627,7 +610,7 @@ async function processFill(f,vehicleFuel,deviceId,vehicle){
               if(out.coords)ns=await nearestStation(out.coords[0],out.coords[1]);
 
              let recovery=null;
-             if(!ns){
+             if(!ns && !matched){
               recovery=await recoveryFromNextIgnition(f,deviceId);
               out.recovery=recovery;
               if(recovery.used&&recovery.station&&recovery.gps){
@@ -638,11 +621,12 @@ async function processFill(f,vehicleFuel,deviceId,vehicle){
              }
 
              if(!ns){
-              out.error=recovery&&recovery.message?recovery.message:"Impianto MIMIT non identificato";
+              out.error=matched?"Nessun impianto MIMIT entro 500 m dalla sosta GPS confermata":(recovery&&recovery.message?recovery.message:"Impianto MIMIT non identificato");
               return out;
              }
 
              out.station=ns;
+             out.stationMimitId=ns.raw[0];
              out.supplier=supplier(ns);
              if(!fuel){out.error="Carburante non riconosciuto";return out}
 
