@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Costi Carburante v55 - recupero FuelUnits</title><link rel="stylesheet" href="./costiCarburante.css?v=15"></head><body><div id="costi-carburante-root"><div class="cc-wrap">
+<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Costi Carburante v57 - riconciliazione rifornimenti</title><link rel="stylesheet" href="./costiCarburante.css?v=15"></head><body><div id="costi-carburante-root"><div class="cc-wrap">
 <h1>Costi Carburante</h1>
 <div class="cc-card">
 <div class="cc-topline">
@@ -31,7 +31,7 @@
 
 (function(){
  const s=document.getElementById("status");
- if(s) s.textContent="Add-In v51 litri + percentuale carburante caricato. Attesa inizializzazione MyGeotab…";
+ if(s) s.textContent="Add-In v57 riconciliazione FillUp caricato. Attesa inizializzazione MyGeotab…";
 })();
 
 (function(){
@@ -470,7 +470,69 @@
              };
             }
 
-            async function processFill(f,vehicleFuel,deviceId,vehicle){
+                         // v57: riconciliazione FillUp Peugeot con l'aumento percentuale reale.
+             // Nessuna data o coordinata di test viene codificata nella logica.
+             async function reconcilePeugeotFillUp(f,deviceId){
+              if(String(deviceId)!=="b1")return null;
+              const original=new Date(f.dateTime||f.date||f.timestamp);
+              if(isNaN(original))return null;
+              const start=new Date(original.getTime()-30*60000);
+              const end=new Date(original.getTime()+48*3600000);
+              let raw=await statusWindow(deviceId,FUEL_PERCENT_DIAGNOSTIC_ID,start,end).catch(()=>[]);
+              let samples=realSamples(raw).filter(r=>{
+               let t=Date.parse(r.date);
+               return Number.isFinite(t)&&t>=start.getTime()&&t<=end.getTime();
+              }).sort((a,b)=>Date.parse(a.date)-Date.parse(b.date));
+              const expected=Number(f.derivedVolume);
+              const capacity=Number(f.tankCapacity?.volume)||44;
+              const candidates=[];
+              for(let i=1;i<samples.length;i++){
+               let a=samples[i-1],b=samples[i],delta=Number(b.data)-Number(a.data);
+               if(delta<3||!Number.isFinite(delta))continue;
+               let liters=delta*capacity/100;
+               let t=Date.parse(b.date);
+               if(t<original.getTime()-30*60000)continue;
+               // Richiediamo una corrispondenza volumetrica per evitare di spostare
+               // il FillUp su un rifornimento diverso nelle 48 ore successive.
+               if(Number.isFinite(expected)&&expected>0&&Math.abs(liters-expected)>Math.max(2,expected*.20))continue;
+               candidates.push({date:b.date,pre:a.data,post:b.data,delta,liters});
+              }
+              if(candidates.length!==1)return null; // ambiguita: conserviamo FillUp
+              const rise=candidates[0],riseTime=Date.parse(rise.date);
+              // Individua la sosta precedente al salto, non il GPS durante la marcia.
+              const gpsFrom=new Date(riseTime-20*60000),gpsTo=new Date(riseTime+60000);
+              let gpsRaw=await get("LogRecord",{
+               deviceSearch:{id:deviceId},fromDate:gpsFrom.toISOString(),toDate:gpsTo.toISOString()
+              },10000).catch(()=>[]);
+              let gps=gpsRaw.map(r=>({date:r.dateTime,t:Date.parse(r.dateTime),lat:Number(r.latitude),lon:Number(r.longitude),speed:Number(r.speed)}))
+               .filter(r=>Number.isFinite(r.t)&&r.t>=gpsFrom.getTime()&&r.t<=riseTime&&Number.isFinite(r.lat)&&Number.isFinite(r.lon))
+               .sort((a,b)=>a.t-b.t);
+              let stops=[],current=[];
+              function finishStop(){
+               if(current.length&&current[current.length-1].t-current[0].t>=60000){
+                stops.push({start:current[0],end:current[current.length-1]});
+               }
+               current=[];
+              }
+              for(const r of gps){
+               if(Number.isFinite(r.speed)&&r.speed<=1){
+                if(current.length&&r.t-current[current.length-1].t>120000)finishStop();
+                current.push(r);
+               }else finishStop();
+              }
+              finishStop();
+              const stop=stops.filter(x=>riseTime-x.end.t<=20*60000).sort((a,b)=>b.end.t-a.end.t)[0];
+              if(!stop)return null;
+              return {
+               date:stop.start.date,coords:[stop.start.lat,stop.start.lon],
+               riseDate:rise.date,percentBefore:rise.pre,percentAfter:rise.post,
+               percentDelta:rise.delta,estimatedLiters:rise.liters,
+               originalDate:f.dateTime||f.date||f.timestamp,
+               stopStart:stop.start.date,stopEnd:stop.end.date
+              };
+             }
+
+async function processFill(f,vehicleFuel,deviceId,vehicle){
              let originalCoords=fillCoords(f),originalDate=f.dateTime||f.date||f.timestamp;
              let fuel=normalizeFuel(f.productType)||vehicleFuel;
              let out={date:originalDate,originalDate,liters:0,fuel,coords:originalCoords,recovery:null};
@@ -541,8 +603,28 @@
               out.litersUnavailable=false;
              }
 
-             let ns=null;
-             if(originalCoords)ns=await nearestStation(originalCoords[0],originalCoords[1]);
+             // v57: per Peugeot b1 correggiamo data e GPS solo se un UNICO
+              // aumento percentuale coincide col derivedVolume e con una sosta GPS.
+              // Gli altri veicoli mantengono il comportamento preesistente.
+              let matched=null;
+              if(String(deviceId)==="b1"){
+               matched=await reconcilePeugeotFillUp(f,deviceId);
+               if(matched){
+                out.date=matched.date;
+                out.coords=matched.coords;
+                out.dateCorrectedFromFuelPercent=true;
+                out.fuelPercentBefore=matched.percentBefore;
+                out.fuelPercentAfter=matched.percentAfter;
+                out.fuelPercentDelta=matched.percentDelta;
+                out.fuelPercentConfirmed=true;
+                out.fuelPercentRiseDate=matched.riseDate;
+                out.fuelPercentEstimatedLiters=matched.estimatedLiters;
+                out.refuelStopStart=matched.stopStart;
+                out.refuelStopEnd=matched.stopEnd;
+               }
+              }
+              let ns=null;
+              if(out.coords)ns=await nearestStation(out.coords[0],out.coords[1]);
 
              let recovery=null;
              if(!ns){
@@ -973,7 +1055,9 @@ function render(items){
              let from=new Date(`${fromValue}T00:00:00`),to=new Date(`${toValue}T23:59:59.999`);
              exportEnabled(false);lastItems=[];$("load").disabled=true;$("status").className="cc-status";$("status").textContent="Caricamento rifornimenti…";
              try{
-              let fills=await get("FillUp",{deviceSearch:{id:vid},fromDate:from.toISOString(),toDate:to.toISOString()},50000);
+              let fillSearchFrom=String(vid)==="b1"?new Date(from.getTime()-48*3600000):from;
+              let fills=await get("FillUp",{deviceSearch:{id:vid},fromDate:fillSearchFrom.toISOString(),toDate:to.toISOString()},50000);
+              fills=(fills||[]).filter(f=>{let t=Date.parse(f.dateTime||f.date||f.timestamp);return Number.isFinite(t)&&t>=fillSearchFrom.getTime()&&t<=to.getTime();});
               fills=(fills||[]).sort((a,b)=>new Date(b.dateTime||b.date)-new Date(a.dateTime||a.date));
               let v=vehicles.find(x=>x.id===vid)||{},vf=await fuelForVehicle(v),out=[];
               for(let i=0;i<fills.length;i++){
@@ -981,10 +1065,10 @@ function render(items){
                let item;
                try{item=await processFill(fills[i],vf,vid,v)}
                catch(e){item={date:fills[i].dateTime||fills[i].date,liters:litersOf(fills[i]),fuel:vf,error:e.message}}
-               out.push(item);
+               if(Date.parse(item.date)>=from.getTime()&&Date.parse(item.date)<=to.getTime())out.push(item);
               }
               let recovery={items:[],jumps:0,matched:0,truncated:false},recoveryError="";
-              if(String(vid)===RECOVERY_DEVICE_ID){
+              if(String(vid)===RECOVERY_DEVICE_ID && false){
                $("status").textContent="Ricerca aumenti DiagnosticFuelUnitsId senza FillUp…";
                try{recovery=await findRecoveredFuelUnits(vid,from,to,fills,vf)}
                catch(e){recoveryError=e.message||String(e);console.error("Recupero FuelUnits",e)}
@@ -992,7 +1076,7 @@ function render(items){
               out=out.concat(recovery.items).sort((a,b)=>new Date(b.date)-new Date(a.date));
               lastItems=out;lastVehicle=v;render(out);exportEnabled(out.length>0);
               $("status").className="cc-status "+(recoveryError?"err":"ok");
-              $("status").textContent=`Completato: ${fills.length} FillUp + ${recovery.items.length} stimati FuelUnits dal ${from.toLocaleDateString("it-IT")} al ${to.toLocaleDateString("it-IT")}.`+
+              $("status").textContent=`Completato: ${out.length} rifornimenti nel periodo (${fills.length} FillUp esaminati) + ${recovery.items.length} stimati FuelUnits dal ${from.toLocaleDateString("it-IT")} al ${to.toLocaleDateString("it-IT")}.`+
                (String(vid)===RECOVERY_DEVICE_ID?` Salti senza FillUp: ${recovery.jumps}; associati a GPS: ${recovery.matched}.`:"")+
                (recovery.truncated?" ATTENZIONE: limite risultati FuelUnits raggiunto.":"")+
                (recoveryError?" Errore recupero FuelUnits: "+recoveryError:"");
