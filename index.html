@@ -482,36 +482,43 @@ async function priceFromFile(url,fuel,fillDate,source,mode){
               }
               if(candidates.length!==1)return null; // ambiguita: conserviamo FillUp
               const rise=candidates[0],riseTime=Date.parse(rise.date);
-              // Individua la sosta precedente al salto, non il GPS durante la marcia.
-              const gpsFrom=new Date(riseTime-20*60000),gpsTo=new Date(riseTime+60000);
-              let gpsRaw=await get("LogRecord",{
+              // v60: l'evento carburante viene associato all'ULTIMO spegnimento
+              // motore prima del salto, con riaccensione successiva ravvicinata.
+              // Evita le soste precedenti (es. semafori o parcheggi) che nella v59
+              // venivano scelte in base alla sola velocita GPS.
+              const ignitionFrom=new Date(riseTime-20*60000);
+              const ignitionTo=new Date(riseTime+2*60000);
+              const ignition=realSamples(await statusWindow(
+               deviceId,IGNITION_DIAG_ID,ignitionFrom,ignitionTo
+              ).catch(()=>[])).sort((a,b)=>Date.parse(a.date)-Date.parse(b.date));
+              const offs=ignition.filter(x=>!ignitionIsOn(x.data)&&
+               Date.parse(x.date)<=riseTime&&riseTime-Date.parse(x.date)<=15*60000);
+              if(!offs.length)return null;
+              const off=offs[offs.length-1],offTime=Date.parse(off.date);
+              const nextOn=ignition.find(x=>ignitionIsOn(x.data)&&
+               Date.parse(x.date)>offTime&&Date.parse(x.date)<=riseTime&&
+               Date.parse(x.date)-offTime<=15*60000);
+              if(!nextOn)return null;
+              // GPS vicino allo spegnimento, non al momento del salto percentuale:
+              // il salto puo essere trasmesso dopo che il veicolo e ripartito.
+              const gpsFrom=new Date(offTime-2*60000),gpsTo=new Date(offTime+90*1000);
+              const gpsRaw=await get("LogRecord",{
                deviceSearch:{id:deviceId},fromDate:gpsFrom.toISOString(),toDate:gpsTo.toISOString()
               },10000).catch(()=>[]);
-              let gps=gpsRaw.map(r=>({date:r.dateTime,t:Date.parse(r.dateTime),lat:Number(r.latitude),lon:Number(r.longitude),speed:Number(r.speed)}))
-               .filter(r=>Number.isFinite(r.t)&&r.t>=gpsFrom.getTime()&&r.t<=riseTime&&Number.isFinite(r.lat)&&Number.isFinite(r.lon))
-               .sort((a,b)=>a.t-b.t);
-              let stops=[],current=[];
-              function finishStop(){
-               if(current.length&&current[current.length-1].t-current[0].t>=60000){
-                stops.push({start:current[0],end:current[current.length-1]});
-               }
-               current=[];
-              }
-              for(const r of gps){
-               if(Number.isFinite(r.speed)&&r.speed<=1){
-                if(current.length&&r.t-current[current.length-1].t>5*60000)finishStop();
-                current.push(r);
-               }else finishStop();
-              }
-              finishStop();
-              const stop=stops.filter(x=>riseTime-x.end.t<=20*60000).sort((a,b)=>b.end.t-a.end.t)[0];
-              if(!stop)return null;
+              const gps=gpsRaw.map(r=>({date:r.dateTime,t:Date.parse(r.dateTime),
+               lat:Number(r.latitude),lon:Number(r.longitude),speed:Number(r.speed)}))
+               .filter(r=>Number.isFinite(r.t)&&Number.isFinite(r.lat)&&Number.isFinite(r.lon)&&
+                Math.abs(r.t-offTime)<=90000&&(!Number.isFinite(r.speed)||r.speed<=3))
+               .sort((a,b)=>Math.abs(a.t-offTime)-Math.abs(b.t-offTime));
+              if(!gps.length)return null;
+              const stop=gps[0];
               return {
-               date:stop.start.date,coords:[stop.start.lat,stop.start.lon],
+               date:off.date,coords:[stop.lat,stop.lon],
                riseDate:rise.date,percentBefore:rise.pre,percentAfter:rise.post,
                percentDelta:rise.delta,estimatedLiters:rise.liters,
                originalDate:f.dateTime||f.date||f.timestamp,
-               stopStart:stop.start.date,stopEnd:stop.end.date
+               stopStart:off.date,stopEnd:nextOn.date,
+               gpsDate:stop.date,matchMethod:"Ignition OFF + ON + GPS vicino allo spegnimento"
               };
              }
 
@@ -604,6 +611,8 @@ async function processFill(f,vehicleFuel,deviceId,vehicle){
                 out.fuelPercentEstimatedLiters=matched.estimatedLiters;
                 out.refuelStopStart=matched.stopStart;
                 out.refuelStopEnd=matched.stopEnd;
+                out.refuelGpsDate=matched.gpsDate;
+                out.refuelMatchMethod=matched.matchMethod;
                }
               }
               let ns=null;
