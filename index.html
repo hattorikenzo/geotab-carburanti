@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Costi Carburante v55</title><link rel="stylesheet" href="./costiCarburante.css?v=15"></head><body><div id="costi-carburante-root"><div class="cc-wrap">
+<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Costi Carburante v55 - Soste GPS</title><link rel="stylesheet" href="./costiCarburante.css?v=15"></head><body><div id="costi-carburante-root"><div class="cc-wrap">
 <h1>Costi Carburante</h1>
 <div class="cc-card">
 <div class="cc-topline">
@@ -24,6 +24,12 @@
 <div class="cc-stat"><small>Costo totale verificato</small><strong id="total">€ 0,00</strong></div>
 <div class="cc-stat"><small>Prezzo medio verificato</small><strong id="avg">—</strong></div>
 </div></div>
+<div class="cc-card" id="cc-gps-panel">
+<h2 style="font-size:18px;margin:0 0 8px">Rifornimenti non rilevati — analisi soste GPS</h2>
+<p class="cc-muted">Le soste sono indizi, non rifornimenti certi. I litri confermati manualmente non modificano i totali Geotab.</p>
+<div id="cc-gps-diagnostics" style="white-space:pre-wrap;font-size:13px;margin:8px 0">Premi Carica storico per analizzare anche le soste.</div>
+<div class="cc-tablewrap"><table><thead><tr><th>Data / ora</th><th>Indizio</th><th>Distanza</th><th>Punti GPS</th><th>Stato</th><th>Conferma litri</th></tr></thead><tbody id="cc-gps-rows"><tr><td colspan="6">Nessuna analisi eseguita.</td></tr></tbody></table></div>
+</div>
 <div class="cc-card"><div class="cc-tablewrap"><table>
 <thead><tr><th>Data rifornimento</th><th>Distributore rilevato</th><th>Carburante</th><th>Prezzo €/L</th><th>Fonte</th><th>Litri</th><th>Costo totale</th></tr></thead>
 <tbody id="rows"><tr><td colspan="7" class="cc-muted">Seleziona un veicolo e il periodo.</td></tr></tbody>
@@ -869,6 +875,93 @@
             }
             function printReport(){window.print()}
 
+             // v55 GPS: analisi indipendente dai FillUp, senza modificare le statistiche.
+             // Coordinate di riferimento Peugeot 2008: modificabili dopo il test.
+             const GPS_REFUEL_STATION={lat:44.85254,lon:11.58680};
+             const GPS_REFUEL_RADIUS=120;
+             const GPS_CHUNK_MS=3*86400000;
+             const GPS_VISIT_GAP_MS=8*60000;
+             const GPS_FILL_MATCH_MS=20*60000;
+             const GPS_STORAGE_KEY="cc-gps-confirmed-v55:";
+             function gpsTime(x){return Date.parse(x.dateTime||x.date||"")}
+             function gpsNum(x){return Number.isFinite(Number(x))?Number(x):null}
+             function gpsRomeTime(t){return new Date(t).toLocaleString("it-IT",{timeZone:"Europe/Rome"})}
+             function gpsSaved(k){try{return JSON.parse(localStorage.getItem(GPS_STORAGE_KEY+k)||"null")}catch(e){return null}}
+             function gpsWrite(k,v){try{if(v===null)localStorage.removeItem(GPS_STORAGE_KEY+k);else localStorage.setItem(GPS_STORAGE_KEY+k,JSON.stringify(v));return true}catch(e){return false}}
+             async function gpsFetchChunks(deviceId,from,to){
+              let all=[],errors=[],limitHits=0,windows=0;
+              for(let cursor=from.getTime();cursor<to.getTime();cursor+=GPS_CHUNK_MS){
+               let end=Math.min(cursor+GPS_CHUNK_MS,to.getTime());windows++;
+               try{
+                let chunk=await get("LogRecord",{deviceSearch:{id:deviceId},fromDate:new Date(cursor).toISOString(),toDate:new Date(end).toISOString()},50000);
+                if(chunk.length>=50000)limitHits++;
+                for(const p of chunk){let t=gpsTime(p);if(t>=cursor&&t<end)all.push(p)}
+               }catch(e){errors.push(new Date(cursor).toISOString().slice(0,10)+": "+(e.message||e))}
+              }
+              return {rows:all,errors,limitHits,windows};
+             }
+             function gpsVisits(rows,ignitionRows,fillRows,deviceId){
+              let valid=rows.map(p=>({time:gpsTime(p),lat:gpsNum(p.latitude),lon:gpsNum(p.longitude),speed:gpsNum(p.speed)}))
+               .filter(p=>Number.isFinite(p.time)&&p.lat!==null&&p.lon!==null&&Math.abs(p.lat)<=90&&Math.abs(p.lon)<=180)
+               .sort((a,b)=>a.time-b.time);
+              let near=valid.map(p=>({...p,distance:hav(p.lat,p.lon,GPS_REFUEL_STATION.lat,GPS_REFUEL_STATION.lon)}))
+               .filter(p=>p.distance<=GPS_REFUEL_RADIUS);
+              let groups=[],current=[];
+              for(const p of near){if(current.length&&p.time-current[current.length-1].time>GPS_VISIT_GAP_MS){groups.push(current);current=[]}current.push(p)}
+              if(current.length)groups.push(current);
+              let all=groups.map(g=>{
+               let start=g[0].time,end=g[g.length-1].time;
+               let off=ignitionRows.some(r=>Number(r.data)===0&&gpsTime(r)>=start-5*60000&&gpsTime(r)<=end+5*60000);
+               let low=g.filter(p=>p.speed!==null&&p.speed<=5).length;
+               let match=fillRows.some(f=>{let t=gpsTime(f);return Number.isFinite(t)&&t>=start-GPS_FILL_MATCH_MS&&t<=end+GPS_FILL_MATCH_MS});
+               let key=deviceId+":"+new Date(start).toISOString().slice(0,16);
+               return {start,end,seconds:Math.round((end-start)/1000),distance:Math.round(Math.min(...g.map(p=>p.distance))),points:g.length,low,off,match,key,likely:off||(low>=2&&end-start>=45000)};
+              });
+              return {valid:valid.length,near:near.length,all,unmatched:all.filter(v=>!v.match)};
+             }
+             function gpsRenderVisits(result,fetchResult,ignitionCount,fillCount){
+              let target=$("cc-gps-rows"),diag=$("cc-gps-diagnostics");if(!target||!diag)return;
+              let confirmed=result.unmatched.filter(v=>gpsSaved(v.key));
+              diag.textContent="GPS validi: "+result.valid+" | GPS entro "+GPS_REFUEL_RADIUS+" m: "+result.near+
+               " | Visite GPS: "+result.all.length+" | Visite associate a FillUp: "+(result.all.length-result.unmatched.length)+
+               " | Visite senza FillUp: "+result.unmatched.length+" | Confermate manualmente: "+confirmed.length+
+               "\nFillUp: "+fillCount+" | Eventi accensione: "+ignitionCount+" | Intervalli GPS: "+fetchResult.windows+
+               (fetchResult.limitHits?"\nATTENZIONE: limite di 50.000 punti raggiunto in "+fetchResult.limitHits+" intervalli.":"")+
+               (fetchResult.errors.length?"\nERRORI GPS: "+fetchResult.errors.join(" ; "):"")+
+               "\nRiferimento: 44.85254, 11.58680; le visite non dimostrano l'avvenuto rifornimento.";
+              target.textContent="";
+              if(!result.unmatched.length){let tr=document.createElement("tr"),td=document.createElement("td");td.colSpan=6;td.textContent="Nessuna visita GPS senza FillUp trovata. Verifica il riepilogo diagnostico.";tr.appendChild(td);target.appendChild(tr);return}
+              for(const v of [...result.unmatched].sort((a,b)=>b.start-a.start)){
+               let tr=document.createElement("tr");
+               function cell(t){let td=document.createElement("td");td.textContent=t;tr.appendChild(td);return td}
+               cell(gpsRomeTime(v.start));cell(v.off?"Motore OFF registrato":v.likely?"Sosta probabile":"Visita GPS da verificare");
+               cell(v.distance+" m");cell(v.points+" (lenti: "+v.low+"; "+v.seconds+" s)");
+               let saved=gpsSaved(v.key);cell(saved?"Confermato manualmente":"Non confermato");
+               let td=cell("");let input=document.createElement("input");input.type="number";input.step="0.01";input.min="0.01";input.max="200";input.style.width="75px";input.placeholder="Litri";input.value=saved?String(saved.liters):"";td.appendChild(input);
+               let button=document.createElement("button");button.textContent="Conferma";button.style.margin="3px";button.addEventListener("click",()=>{
+                let liters=Number(input.value);if(!Number.isFinite(liters)||liters<=0||liters>200){alert("Inserisci litri validi (0–200).");return}
+                if(!gpsWrite(v.key,{liters,confirmedAt:new Date().toISOString()})){alert("Salvataggio locale non disponibile.");return}
+                gpsRenderVisits(result,fetchResult,ignitionCount,fillCount);
+               });td.appendChild(button);
+               if(saved){let undo=document.createElement("button");undo.textContent="Annulla";undo.addEventListener("click",()=>{gpsWrite(v.key,null);gpsRenderVisits(result,fetchResult,ignitionCount,fillCount)});td.appendChild(undo)}
+               target.appendChild(tr);
+              }
+             }
+             async function gpsAnalyze(deviceId,from,to,fillRows){
+              let diag=$("cc-gps-diagnostics"),body=$("cc-gps-rows");
+              if(!diag||!body)return;
+              diag.textContent="Recupero GPS in intervalli di 3 giorni…";
+              body.innerHTML='<tr><td colspan="6">Analisi in corso…</td></tr>';
+              try{
+               let fetched=await gpsFetchChunks(deviceId,from,to);
+               let ignition=[];
+               try{ignition=await get("StatusData",{deviceSearch:{id:deviceId},diagnosticSearch:{id:"DiagnosticIgnitionId"},fromDate:from.toISOString(),toDate:to.toISOString()},50000)}catch(e){fetched.errors.push("Accensione: "+(e.message||e))}
+               ignition=ignition.filter(r=>gpsTime(r)>=from.getTime()&&gpsTime(r)<=to.getTime());
+               let result=gpsVisits(fetched.rows,ignition,fillRows,deviceId);
+               gpsRenderVisits(result,fetched,ignition.length,fillRows.length);
+              }catch(e){diag.textContent="Errore analisi GPS: "+(e.message||e);body.innerHTML='<tr><td colspan="6">Analisi non completata; i FillUp originali restano disponibili.</td></tr>'}
+             }
+
             async function loadHistory(){
              $("status").className="cc-status";
              $("status").textContent="Avvio caricamento storico…";
@@ -891,6 +984,7 @@
                out.push(item);
               }
               lastItems=out;lastVehicle=v;render(out);exportEnabled(out.length>0);$("status").className="cc-status ok";$("status").textContent=`Completato: ${fills.length} rifornimenti analizzati dal ${from.toLocaleDateString("it-IT")} al ${to.toLocaleDateString("it-IT")}.`;
+              await gpsAnalyze(vid,from,to,fills);
              }catch(e){$("status").className="cc-status err";$("status").textContent="Errore: "+e.message}
              finally{$("load").disabled=false}
             }
