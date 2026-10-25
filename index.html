@@ -1068,12 +1068,24 @@ function render(items){
                if(Date.parse(item.date)>=from.getTime()&&Date.parse(item.date)<=to.getTime())out.push(item);
               }
               let recovery={items:[],jumps:0,matched:0,truncated:false},recoveryError="";
-              if(String(vid)===RECOVERY_DEVICE_ID && false){
+              if(String(vid)===RECOVERY_DEVICE_ID){
                $("status").textContent="Ricerca aumenti DiagnosticFuelUnitsId senza FillUp…";
                try{recovery=await findRecoveredFuelUnits(vid,from,to,fills,vf)}
                catch(e){recoveryError=e.message||String(e);console.error("Recupero FuelUnits",e)}
               }
-              out=out.concat(recovery.items).sort((a,b)=>new Date(b.date)-new Date(a.date));
+              // v58: evita duplicati anche quando la data FillUp originale e stata
+              // riconciliata con la data reale (es. rifornimento del 25 ottobre).
+              // Un evento FuelUnits entro 90 minuti da un FillUp gia presente
+              // non deve produrre una seconda riga.
+              const uniqueRecovered=recovery.items.filter(candidate=>{
+               const t=Date.parse(candidate.date);
+               return Number.isFinite(t)&&!out.some(existing=>{
+                const dates=[existing.date,existing.originalDate,existing.fuelPercentRiseDate,existing.fuelVolumeRiseDate];
+                return dates.some(d=>d&&Number.isFinite(Date.parse(d))&&Math.abs(Date.parse(d)-t)<=90*60000);
+               });
+              });
+              recovery.items=uniqueRecovered;
+              out=out.concat(uniqueRecovered).sort((a,b)=>new Date(b.date)-new Date(a.date));
               lastItems=out;lastVehicle=v;render(out);exportEnabled(out.length>0);
               $("status").className="cc-status "+(recoveryError?"err":"ok");
               $("status").textContent=`Completato: ${out.length} rifornimenti nel periodo (${fills.length} FillUp esaminati) + ${recovery.items.length} stimati FuelUnits dal ${from.toLocaleDateString("it-IT")} al ${to.toLocaleDateString("it-IT")}.`+
