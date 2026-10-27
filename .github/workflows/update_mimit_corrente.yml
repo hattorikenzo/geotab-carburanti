@@ -3,8 +3,7 @@ name: Aggiorna prezzi MIMIT correnti
 on:
   workflow_dispatch:
   schedule:
-    # 09:15 e 17:15 durante l'ora legale italiana
-    # 08:15 e 16:15 durante l'ora solare italiana
+    # UTC: 09:15/17:15 in estate; 08:15/16:15 in inverno
     - cron: '15 7,15 * * *'
 
 permissions:
@@ -34,11 +33,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat > /tmp/update_mimit.py <<'PYCODE'
+          python - <<'PYCODE'
           import csv
           import gzip
-          import hashlib
-          import io
           import json
           import re
           import subprocess
@@ -51,6 +48,7 @@ jobs:
           TMP = Path('/tmp/mimit_prices.csv')
           MIRROR = 'https://raw.githubusercontent.com/LucaDDDD/benzina-data/main/data/'
           TODAY = datetime.now(ZoneInfo('Europe/Rome')).date()
+          ROOT.mkdir(parents=True, exist_ok=True)
 
           def download(url, path):
               subprocess.run([
@@ -96,3 +94,55 @@ jobs:
               check_age(extraction)
               archive = Path('/tmp/mimit_fallback.csv.gz')
               url = f'{MIRROR}{extraction:%Y}/{extraction:%m}/prezzo_alle_8-{extraction:%Y%m%d}.csv.gz'
+              download(url, archive)
+              with gzip.open(archive, 'rb') as source, TMP.open('wb') as target:
+                  while chunk := source.read(1024 * 1024):
+                      target.write(chunk)
+              csv_extraction = inspect_csv(TMP)
+              if csv_extraction is not None and csv_extraction != extraction:
+                  raise ValueError(f'Data CSV {csv_extraction} diversa dal metadata {extraction}')
+              return 'GitHub mirror', extraction
+
+          failures = []
+          selected = None
+          for source in (official, github_fallback):
+              try:
+                  selected = source()
+                  break
+              except Exception as exc:
+                  failures.append(f'{source.__name__}: {exc}')
+                  print(f'AVVISO: {failures[-1]}', flush=True)
+
+          if selected is None:
+              raise SystemExit('Nessuna fonte valida disponibile; archivio invariato. ' + ' | '.join(failures))
+
+          source_name, extraction = selected
+          destination = ROOT / f'{extraction:%Y}' / f'{extraction:%m}' / f'prezzo_alle_8-{extraction:%Y%m%d}.csv.gz'
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          with TMP.open('rb') as source, gzip.open(destination, 'wb', compresslevel=6) as target:
+              while chunk := source.read(1024 * 1024):
+                  target.write(chunk)
+          # Conserva la data di estrazione e la provenienza del CSV.
+          metadata = {
+              'fonte': source_name,
+              'ultima_estrazione': extraction.isoformat(),
+              'scaricato_utc': datetime.now(timezone.utc).isoformat(),
+              'file': str(destination)
+          }
+          (ROOT / 'last_update.json').write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+          print(f'OK: {source_name}, estrazione {extraction}, archivio {destination}')
+          PYCODE
+
+      - name: Pubblica archivio su gh-pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mimit_snapshots/
+          if git diff --cached --quiet; then
+            echo 'Nessuna modifica da pubblicare'
+          else
+            git commit -m 'Aggiorna archivio prezzi MIMIT verificati'
+            git push origin HEAD:gh-pages
+          fi
