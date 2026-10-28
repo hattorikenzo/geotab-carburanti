@@ -1,219 +1,99 @@
-name: Aggiorna prezzi MIMIT correnti
+name: Aggiorna MIMIT via FRITZBox (prezzi, anagrafica, archivio)
 
 on:
   workflow_dispatch:
   schedule:
-    # UTC: 09:15/17:15 in estate; 08:15/16:15 in inverno
+    # Due controlli al giorno (UTC), orari locali variabili con ora legale
     - cron: '15 7,15 * * *'
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
-  group: aggiorna-mimit-corrente
+  group: mimit-dataset-unificato
   cancel-in-progress: false
 
 jobs:
-  update:
+  aggiorna:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
-      - name: Checkout gh-pages
+      - name: Checkout script main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: source
+          persist-credentials: false
+
+      - name: Checkout dati gh-pages
         uses: actions/checkout@v4
         with:
           ref: gh-pages
+          path: published
           fetch-depth: 0
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      - name: Installa WireGuard
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools >/dev/null
 
-      - name: Attiva VPN WireGuard FRITZ!Box (solo MIMIT)
-        id: vpn
-        shell: bash
+      - name: Avvia WireGuard solo per MIMIT
         env:
           WG_CONFIG: ${{ secrets.WIREGUARD_CONFIG }}
         run: |
           set -euo pipefail
           test -n "$WG_CONFIG" || { echo 'Secret WIREGUARD_CONFIG mancante'; exit 1; }
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wireguard-tools resolvconf >/dev/null
           umask 077
           printf '%s\n' "$WG_CONFIG" > "$RUNNER_TEMP/wg-mimit.conf"
           sudo install -m 600 "$RUNNER_TEMP/wg-mimit.conf" /etc/wireguard/wg-mimit.conf
           rm -f "$RUNNER_TEMP/wg-mimit.conf"
-          # Evita che wg-quick sostituisca il DNS del runner con quello del FRITZ!Box.
-          # Il traffico generale continua a usare il DNS originale di GitHub Actions.
           sudo sed -i -E '/^[[:space:]]*DNS[[:space:]]*=/d' /etc/wireguard/wg-mimit.conf
-          # Il runner deve instradare SOLO l'IP ufficiale MIMIT via VPN.
           sudo sed -i -E 's@^[[:space:]]*AllowedIPs[[:space:]]*=.*@AllowedIPs = 81.126.92.6/32@' /etc/wireguard/wg-mimit.conf
           sudo wg-quick up wg-mimit
-          echo '=== Rotta MIMIT ==='
           ip -4 route get 81.126.92.6
-          # Controllo senza stampare chiavi, endpoint o indirizzi della rete privata.
-          for attempt in 1 2 3 4 5; do
-            sleep 2
-            if sudo wg show wg-mimit latest-handshakes | awk '$2 > 0 {ok=1} END {exit !ok}'; then
-              echo 'Handshake WireGuard riuscito'
-              exit 0
-            fi
-          done
-          echo 'Handshake WireGuard non riuscito'
-          exit 1
+          # Un handshake puo iniziare solo dopo il primo pacchetto verso MIMIT.
+          curl -4 -fLsS --noproxy '*' --resolve www.mimit.gov.it:443:81.126.92.6 \
+            --connect-timeout 15 --max-time 30 \
+            -o /dev/null https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv
+          sudo wg show wg-mimit latest-handshakes | awk '$2 > 0 {ok=1} END {exit !ok}'
+          echo 'VPN e HTTPS MIMIT verificati'
 
-      - name: Scarica e archivia prezzi verificati
-        id: archive
+      - name: Aggiorna prezzi correnti, anagrafica e snapshot
+        working-directory: published
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PYCODE'
-          import csv
-          import gzip
-          import json
-          import os
-          import re
-          import subprocess
-          import urllib.request
-          from datetime import date, datetime, timezone
-          from pathlib import Path
-          from zoneinfo import ZoneInfo
+          python3 ../source/.github/scripts/aggiorna_prezzi.py
 
-          ROOT = Path('mimit_snapshots')
-          TMP = Path('/tmp/mimit_prices.csv')
-          MIRROR = 'https://raw.githubusercontent.com/LucaDDDD/benzina-data/main/data/'
-          TODAY = datetime.now(ZoneInfo('Europe/Rome')).date()
+      - name: Chiudi VPN e rimuovi credenziali temporanee
+        if: always()
+        run: |
+          sudo wg-quick down wg-mimit 2>/dev/null || true
+          sudo rm -f /etc/wireguard/wg-mimit.conf
+          rm -f "$RUNNER_TEMP/wg-mimit.conf"
 
-          def output(name, value):
-              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
-                  stream.write(f'{name}={value}\n')
-
-          def summary(message):
-              path = os.environ.get('GITHUB_STEP_SUMMARY')
-              if path:
-                  with open(path, 'a', encoding='utf-8') as stream:
-                      stream.write(message + '\n')
-
-          def download(url, path):
-              path.unlink(missing_ok=True)
-              subprocess.run([
-                  'curl', '-4', '-fLsS',
-                  *(['--resolve', 'www.mimit.gov.it:443:81.126.92.6'] if 'www.mimit.gov.it' in url else []),
-                  '--connect-timeout', '8',
-                  '--max-time', '35', '--retry', '0',
-                  '-A', 'Mozilla/5.0', '-o', str(path), url
-              ], check=True, timeout=42)
-
-          def inspect_csv(path):
-              if not path.is_file() or path.stat().st_size < 10000:
-                  raise ValueError('CSV assente o troppo piccolo')
-              with path.open('r', encoding='utf-8-sig', errors='replace', newline='') as stream:
-                  lines = [stream.readline() for _ in range(30)]
-              header = next((line for line in lines if 'idimpianto' in line.lower()), '')
-              if not header:
-                  raise ValueError('Intestazione idImpianto assente')
-              separator = '|' if header.count('|') > header.count(';') else ';'
-              columns = {column.strip().lower() for column in next(csv.reader([header], delimiter=separator))}
-              required = {'idimpianto', 'desccarburante', 'prezzo', 'isself', 'dtcomu'}
-              if not required.issubset(columns):
-                  raise ValueError(f'Colonne mancanti: {required - columns}')
-              match = re.search(r'Estrazione\s+del\s+(\d{4}-\d{2}-\d{2})', ''.join(lines), re.I)
-              return date.fromisoformat(match.group(1)) if match else None
-
-          def check_age(extraction):
-              age = (TODAY - extraction).days
-              if not 0 <= age <= 7:
-                  raise ValueError(f'Estrazione non recente: {extraction}, {age} giorni')
-
-          def official():
-              download('https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv', TMP)
-              extraction = inspect_csv(TMP)
-              if extraction is None:
-                  raise ValueError('MIMIT: data estrazione non verificabile')
-              check_age(extraction)
-              return 'MIMIT', extraction
-
-          def github_fallback():
-              request = urllib.request.Request(
-                  MIRROR + 'last_update.json',
-                  headers={'User-Agent': 'Mozilla/5.0'}
-              )
-              with urllib.request.urlopen(request, timeout=15) as response:
-                  metadata = json.load(response)
-              extraction = date.fromisoformat(metadata['ultima_estrazione'])
-              check_age(extraction)
-              archive = Path('/tmp/mimit_fallback.csv.gz')
-              url = f'{MIRROR}{extraction:%Y}/{extraction:%m}/prezzo_alle_8-{extraction:%Y%m%d}.csv.gz'
-              download(url, archive)
-              with gzip.open(archive, 'rb') as source, TMP.open('wb') as target:
-                  while chunk := source.read(1024 * 1024):
-                      target.write(chunk)
-              csv_extraction = inspect_csv(TMP)
-              if csv_extraction is not None and csv_extraction != extraction:
-                  raise ValueError(f'Data CSV {csv_extraction} diversa dal metadata {extraction}')
-              return 'GitHub mirror', extraction
-
-          failures = []
-          selected = None
-          for source in (official, github_fallback):
-              try:
-                  selected = source()
-                  break
-              except Exception as exc:
-                  failure = f'{source.__name__}: {exc}'
-                  failures.append(failure)
-                  print(f'AVVISO: {failure}', flush=True)
-
-          if selected is None:
-              output('archive_ready', 'false')
-              print('Nessuna fonte valida disponibile; archivio invariato.', flush=True)
-              summary('## Aggiornamento MIMIT: nessun nuovo CSV valido')
-              summary('Il controllo è stato eseguito, ma **i prezzi non sono stati aggiornati**. Archivio invariato.\n')
-              for failure in failures:
-                  summary(f'- {failure}')
-              raise SystemExit(0)
-
-          source_name, extraction = selected
-          destination = ROOT / f'{extraction:%Y}' / f'{extraction:%m}' / f'prezzo_alle_8-{extraction:%Y%m%d}.csv.gz'
-          destination.parent.mkdir(parents=True, exist_ok=True)
-          with TMP.open('rb') as source, gzip.open(destination, 'wb', compresslevel=6) as target:
-              while chunk := source.read(1024 * 1024):
-                  target.write(chunk)
-
-          metadata = {
-              'fonte': source_name,
-              'ultima_estrazione': extraction.isoformat(),
-              'scaricato_utc': datetime.now(timezone.utc).isoformat(),
-              'file': str(destination)
-          }
-          (ROOT / 'last_update.json').write_text(
-              json.dumps(metadata, indent=2, ensure_ascii=False) + '\n',
-              encoding='utf-8'
-          )
-          output('archive_ready', 'true')
-          summary(f'## Aggiornamento MIMIT: CSV verificato\n\nFonte: **{source_name}**; estrazione: **{extraction}**.\n')
-          print(f'OK: {source_name}, estrazione {extraction}, archivio {destination}')
-          PYCODE
-
-      - name: Pubblica archivio su gh-pages
-        if: steps.archive.outputs.archive_ready == 'true'
+      - name: Pubblica aggiornamenti su gh-pages
+        id: publish
+        working-directory: published
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add mimit_snapshots/
+          git add data/prezzi data/ultimo_aggiornamento_prezzi.json mimit_snapshots
           if git diff --cached --quiet; then
-            echo 'Nessuna modifica da pubblicare'
+            echo 'Nessuna modifica nei dati'
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
           else
-            git commit -m 'Aggiorna archivio prezzi MIMIT verificati'
+            git commit -m 'Aggiorna dati MIMIT ufficiali via WireGuard'
             git push origin HEAD:gh-pages
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Chiudi VPN e cancella credenziali temporanee
-        if: always()
-        shell: bash
-        run: |
-          sudo wg-quick down wg-mimit 2>/dev/null || true
-          sudo rm -f /etc/wireguard/wg-mimit.conf
-          rm -f "$RUNNER_TEMP/wg-mimit.conf"
+      - name: Ricostruisci GitHub Pages con i dati nuovi
+        if: steps.publish.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy_site.yml --repo "$GITHUB_REPOSITORY" --ref main
