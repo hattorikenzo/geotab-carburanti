@@ -23,7 +23,10 @@ MAX_MIRROR_DAYS = 7
 
 def download(url, dest, timeout=100):
     subprocess.run([
-        'curl', '-4', '-fLsS', '--connect-timeout', '15',
+        'curl', '-4', '-fLsS',
+        *(['--noproxy', '*', '--resolve', 'www.mimit.gov.it:443:81.126.92.6']
+          if url.startswith(MIMIT) else []),
+        '--connect-timeout', '15',
         '--max-time', str(timeout), '--retry', '3', '--retry-delay', '8',
         '--retry-all-errors', '-A', 'Mozilla/5.0', url, '-o', str(dest)
     ], check=True)
@@ -87,6 +90,19 @@ def acquire(tmp):
         day = pday or sday
         if day and (date.today() - day).days not in range(0, 8):
             raise ValueError(f'Estrazione MIMIT obsoleta o futura: {day}')
+        # Archivia il CSV ufficiale solo dopo le verifiche di struttura e data.
+        # Il file viene poi pubblicato insieme ai prezzi correnti sul ramo gh-pages.
+        if day is None:
+            raise ValueError('Data estrazione MIMIT non verificabile')
+        snapshot = ROOT / 'mimit_snapshots' / f'{day:%Y}' / f'{day:%m}' / f'prezzo_alle_8-{day:%Y%m%d}.csv.gz'
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        if not snapshot.exists():
+            with paths[NAMES[0]].open('rb') as inp, gzip.open(snapshot, 'wb', compresslevel=6) as gz:
+                shutil.copyfileobj(inp, gz)
+        meta = {'fonte': 'MIMIT', 'ultima_estrazione': day.isoformat(),
+                'scaricato_utc': datetime.now(timezone.utc).isoformat(), 'file': str(snapshot.relative_to(ROOT))}
+        (ROOT / 'mimit_snapshots' / 'last_update.json').write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
         return prices, stations, 'MIMIT', day
     except Exception as exc:
         print(f'Fonte MIMIT indisponibile/non valida: {exc}', flush=True)
