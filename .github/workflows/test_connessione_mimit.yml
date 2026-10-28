@@ -1,3 +1,4 @@
+
 name: Test connessione MIMIT
 
 on:
@@ -12,32 +13,37 @@ jobs:
       - name: Diagnostica connessione MIMIT
         shell: bash
         run: |
-        echo "=== TEST PORTA 80 HTTP ==="
-curl -4 -v -I --connect-timeout 5 --max-time 8 \
-  http://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv || true
-
-echo "=== TEST PORTA 8080 HTTP ==="
-curl -4 -v -I --connect-timeout 5 --max-time 8 \
-  http://www.mimit.gov.it:8080/images/exportCSV/prezzo_alle_8.csv || true
-
-echo "=== TEST PORTA 8443 HTTPS ==="
-curl -4 -v -k -I --connect-timeout 5 --max-time 8 \
-  https://www.mimit.gov.it:8443/images/exportCSV/prezzo_alle_8.csv || true
           echo "=== DNS MIMIT ==="
           getent ahosts www.mimit.gov.it || true
 
-          echo "=== TEST HTTPS IPv4 ==="
-          curl -4 -I -L \
+          echo "=== TEST PORTA 80 HTTP ==="
+          curl -4 -v -I \
+            --connect-timeout 5 \
+            --max-time 8 \
+            http://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv || true
+
+          echo "=== TEST PORTA 8080 HTTP ==="
+          curl -4 -v -I \
+            --connect-timeout 5 \
+            --max-time 8 \
+            http://www.mimit.gov.it:8080/images/exportCSV/prezzo_alle_8.csv || true
+
+          echo "=== TEST PORTA 8443 HTTPS ==="
+          curl -4 -v -k -I \
+            --connect-timeout 5 \
+            --max-time 8 \
+            https://www.mimit.gov.it:8443/images/exportCSV/prezzo_alle_8.csv || true
+
+          echo "=== TEST HTTPS IPv4 PORTA 443 ==="
+          curl -4 -v -I -L \
             --connect-timeout 10 \
             --max-time 20 \
-            -v \
             https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv || true
 
-          echo "=== TEST HTTPS IPv6 ==="
-          curl -6 -I -L \
+          echo "=== TEST HTTPS IPv6 PORTA 443 ==="
+          curl -6 -v -I -L \
             --connect-timeout 10 \
             --max-time 20 \
-            -v \
             https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv || true
 
           echo "=== TEST DOWNLOAD CSV ==="
