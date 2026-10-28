@@ -29,6 +29,36 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Attiva VPN WireGuard FRITZ!Box (solo MIMIT)
+        id: vpn
+        shell: bash
+        env:
+          WG_CONFIG: ${{ secrets.WIREGUARD_CONFIG }}
+        run: |
+          set -euo pipefail
+          test -n "$WG_CONFIG" || { echo 'Secret WIREGUARD_CONFIG mancante'; exit 1; }
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wireguard-tools resolvconf >/dev/null
+          umask 077
+          printf '%s\n' "$WG_CONFIG" > "$RUNNER_TEMP/wg-mimit.conf"
+          sudo install -m 600 "$RUNNER_TEMP/wg-mimit.conf" /etc/wireguard/wg-mimit.conf
+          rm -f "$RUNNER_TEMP/wg-mimit.conf"
+          # Il runner deve instradare SOLO l'IP ufficiale MIMIT via VPN.
+          sudo sed -i -E 's@^[[:space:]]*AllowedIPs[[:space:]]*=.*@AllowedIPs = 81.126.92.6/32@' /etc/wireguard/wg-mimit.conf
+          sudo wg-quick up wg-mimit
+          echo '=== Rotta MIMIT ==='
+          ip -4 route get 81.126.92.6
+          # Controllo senza stampare chiavi, endpoint o indirizzi della rete privata.
+          for attempt in 1 2 3 4 5; do
+            sleep 2
+            if sudo wg show wg-mimit latest-handshakes | awk '$2 > 0 {ok=1} END {exit !ok}'; then
+              echo 'Handshake WireGuard riuscito'
+              exit 0
+            fi
+          done
+          echo 'Handshake WireGuard non riuscito'
+          exit 1
+
       - name: Scarica e archivia prezzi verificati
         shell: bash
         run: |
@@ -146,3 +176,11 @@ jobs:
             git commit -m 'Aggiorna archivio prezzi MIMIT verificati'
             git push origin HEAD:gh-pages
           fi
+
+      - name: Chiudi VPN e cancella credenziali temporanee
+        if: always()
+        shell: bash
+        run: |
+          sudo wg-quick down wg-mimit 2>/dev/null || true
+          sudo rm -f /etc/wireguard/wg-mimit.conf
+          rm -f "$RUNNER_TEMP/wg-mimit.conf"
