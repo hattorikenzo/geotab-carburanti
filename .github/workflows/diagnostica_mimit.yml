@@ -1,5 +1,5 @@
 
-name: Diagnostica connessione MIMIT
+name: Diagnostica MIMIT - Porte e rete
 
 on:
   workflow_dispatch:
@@ -10,74 +10,49 @@ permissions:
 jobs:
   diagnostica:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 4
 
     steps:
-      - name: Diagnostica DNS e rete MIMIT
+      - name: Verifica porte e percorso MIMIT
         shell: bash
         run: |
           set +e
 
           HOST="www.mimit.gov.it"
-          URL="https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
+          IP="81.126.92.6"
 
-          echo "=================================="
-          echo "1. INFORMAZIONI AMBIENTE"
-          echo "=================================="
-          date -u
-          uname -a
-          echo "IP pubblico del runner:"
-          curl -4 -sS --max-time 5 https://api.ipify.org
-          echo ""
+          echo "=== 1. DNS ==="
+          getent ahostsv4 "$HOST"
 
-          echo "=================================="
-          echo "2. RISOLUZIONE DNS"
-          echo "=================================="
-          echo "IPv4:"
-          getent ahostsv4 "$HOST" || true
+          echo "=== 2. PORTA 80 HTTP ==="
+          timeout 7 bash -c \
+            "echo > /dev/tcp/$IP/80"
+          echo "Risultato porta 80: $?"
 
-          echo "IPv6:"
-          getent ahostsv6 "$HOST" || true
+          echo "=== 3. PORTA 443 HTTPS ==="
+          timeout 7 bash -c \
+            "echo > /dev/tcp/$IP/443"
+          echo "Risultato porta 443: $?"
 
-          echo "=================================="
-          echo "3. CONNESSIONE TCP 443"
-          echo "=================================="
-          timeout 8 bash -c \
-            "echo > /dev/tcp/$HOST/443"
-          echo "TCP exit code: $?"
-
-          echo "=================================="
-          echo "4. TEST HTTPS IPv4"
-          echo "=================================="
-          curl -4 -v -I \
-            --connect-timeout 7 \
-            --max-time 10 \
-            "$URL" 2>&1 | tail -35
-
-          echo "=================================="
-          echo "5. TEST HTTPS IPv6"
-          echo "=================================="
-          curl -6 -v -I \
-            --connect-timeout 7 \
-            --max-time 10 \
-            "$URL" 2>&1 | tail -35
-
-          echo "=================================="
-          echo "6. TEST TLS OPENSSL"
-          echo "=================================="
-          timeout 10 openssl s_client \
-            -connect "$HOST:443" \
-            -servername "$HOST" \
-            -brief < /dev/null 2>&1 | head -25
-
-          echo "=================================="
-          echo "7. CONFRONTO CON GITHUB"
-          echo "=================================="
+          echo "=== 4. HTTP ==="
           curl -4 -I \
-            --connect-timeout 5 \
+            --connect-timeout 6 \
             --max-time 8 \
-            https://github.com 2>&1 | tail -15
+            "http://$HOST/" 2>&1 | tail -15
 
-          echo "=================================="
-          echo "DIAGNOSTICA COMPLETATA"
-          echo "=================================="
+          echo "=== 5. HTTPS ==="
+          curl -4 -I \
+            --connect-timeout 6 \
+            --max-time 8 \
+            "https://$HOST/" 2>&1 | tail -15
+
+          echo "=== 6. PERCORSO DI RETE ==="
+          if command -v tracepath >/dev/null; then
+            timeout 12 tracepath -m 12 "$IP"
+          elif command -v traceroute >/dev/null; then
+            timeout 12 traceroute -m 12 -w 1 "$IP"
+          else
+            echo "Strumenti di tracciamento non installati"
+          fi
+
+          echo "=== DIAGNOSTICA TERMINATA ==="
