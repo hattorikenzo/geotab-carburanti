@@ -1,0 +1,84 @@
+
+name: Test MIMIT tramite FRITZBox WireGuard
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-vpn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Installa WireGuard
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y wireguard-tools
+
+      - name: Configura VPN
+        env:
+          WG_CONFIG: ${{ secrets.WIREGUARD_CONFIG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "$WG_CONFIG" ]; then
+            echo "Secret WIREGUARD_CONFIG mancante"
+            exit 1
+          fi
+
+          umask 077
+          printf '%s\n' "$WG_CONFIG" > wg-mimit.conf
+
+          # Evita di alterare la rotta principale del runner.
+          # La VPN verra usata solo per MIMIT.
+          sudo install -m 600 wg-mimit.conf \
+            /etc/wireguard/wg-mimit.conf
+          rm -f wg-mimit.conf
+
+          sudo sed -i \
+            's/^AllowedIPs = .*/AllowedIPs = 81.126.92.6\/32/' \
+            /etc/wireguard/wg-mimit.conf
+
+          sudo wg-quick up wg-mimit
+
+          echo "=== INTERFACCIA VPN ==="
+          sudo wg show wg-mimit \
+            | grep -E 'interface:|peer:|latest handshake|transfer:' \
+            || true
+
+      - name: Test connessione MIMIT
+        shell: bash
+        run: |
+          set +e
+
+          echo "=== ROTTA VERSO MIMIT ==="
+          ip route get 81.126.92.6
+
+          echo "=== DOWNLOAD CSV ==="
+          curl -4 -sS \
+            --connect-timeout 15 \
+            --max-time 40 \
+            -o /tmp/prezzo_alle_8.csv \
+            -w "HTTP: %{http_code}\nByte: %{size_download}\n" \
+            https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv
+
+          RESULT=$?
+
+          if [ "$RESULT" -eq 0 ]; then
+            echo "=== PRIMA RIGA CSV ==="
+            head -n 1 /tmp/prezzo_alle_8.csv
+          else
+            echo "DOWNLOAD FALLITO: $RESULT"
+            exit 1
+          fi
+
+      - name: Chiudi VPN
+        if: always()
+        shell: bash
+        run: |
+          sudo wg-quick down wg-mimit || true
+          sudo rm -f /etc/wireguard/wg-mimit.conf
