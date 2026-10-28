@@ -1,0 +1,83 @@
+
+name: Diagnostica connessione MIMIT
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostica:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Diagnostica DNS e rete MIMIT
+        shell: bash
+        run: |
+          set +e
+
+          HOST="www.mimit.gov.it"
+          URL="https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
+
+          echo "=================================="
+          echo "1. INFORMAZIONI AMBIENTE"
+          echo "=================================="
+          date -u
+          uname -a
+          echo "IP pubblico del runner:"
+          curl -4 -sS --max-time 5 https://api.ipify.org
+          echo ""
+
+          echo "=================================="
+          echo "2. RISOLUZIONE DNS"
+          echo "=================================="
+          echo "IPv4:"
+          getent ahostsv4 "$HOST" || true
+
+          echo "IPv6:"
+          getent ahostsv6 "$HOST" || true
+
+          echo "=================================="
+          echo "3. CONNESSIONE TCP 443"
+          echo "=================================="
+          timeout 8 bash -c \
+            "echo > /dev/tcp/$HOST/443"
+          echo "TCP exit code: $?"
+
+          echo "=================================="
+          echo "4. TEST HTTPS IPv4"
+          echo "=================================="
+          curl -4 -v -I \
+            --connect-timeout 7 \
+            --max-time 10 \
+            "$URL" 2>&1 | tail -35
+
+          echo "=================================="
+          echo "5. TEST HTTPS IPv6"
+          echo "=================================="
+          curl -6 -v -I \
+            --connect-timeout 7 \
+            --max-time 10 \
+            "$URL" 2>&1 | tail -35
+
+          echo "=================================="
+          echo "6. TEST TLS OPENSSL"
+          echo "=================================="
+          timeout 10 openssl s_client \
+            -connect "$HOST:443" \
+            -servername "$HOST" \
+            -brief < /dev/null 2>&1 | head -25
+
+          echo "=================================="
+          echo "7. CONFRONTO CON GITHUB"
+          echo "=================================="
+          curl -4 -I \
+            --connect-timeout 5 \
+            --max-time 8 \
+            https://github.com 2>&1 | tail -15
+
+          echo "=================================="
+          echo "DIAGNOSTICA COMPLETATA"
+          echo "=================================="
