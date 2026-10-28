@@ -1,0 +1,43 @@
+
+name: Test MIMIT PowerShell
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Test download MIMIT con PowerShell
+        shell: pwsh
+        run: |
+          $url = "https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
+          $file = Join-Path $env:RUNNER_TEMP "prezzo_alle_8.csv"
+
+          try {
+            $tempo = Measure-Command {
+              Invoke-WebRequest `
+                -Uri $url `
+                -OutFile $file `
+                -TimeoutSec 30 `
+                -ErrorAction Stop
+            }
+
+            $info = Get-Item $file
+            $primaRiga = Get-Content $file -TotalCount 1
+
+            Write-Host "DOWNLOAD RIUSCITO"
+            Write-Host "Dimensione: $($info.Length) byte"
+            Write-Host "Tempo: $($tempo.TotalSeconds) secondi"
+            Write-Host "Prima riga: $primaRiga"
+          }
+          catch {
+            Write-Host "DOWNLOAD FALLITO"
+            Write-Host $_.Exception.Message
+            exit 1
+          }
