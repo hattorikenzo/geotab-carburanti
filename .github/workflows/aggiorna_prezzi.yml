@@ -43,6 +43,9 @@ jobs:
           printf '%s\n' "$WG_CONFIG" > "$RUNNER_TEMP/wg-mimit.conf"
           sudo install -m 600 "$RUNNER_TEMP/wg-mimit.conf" /etc/wireguard/wg-mimit.conf
           rm -f "$RUNNER_TEMP/wg-mimit.conf"
+          # Evita che wg-quick sostituisca il DNS del runner con quello del FRITZ!Box.
+          # Il traffico generale continua a usare il DNS originale di GitHub Actions.
+          sudo sed -i -E '/^[[:space:]]*DNS[[:space:]]*=/d' /etc/wireguard/wg-mimit.conf
           # Il runner deve instradare SOLO l'IP ufficiale MIMIT via VPN.
           sudo sed -i -E 's@^[[:space:]]*AllowedIPs[[:space:]]*=.*@AllowedIPs = 81.126.92.6/32@' /etc/wireguard/wg-mimit.conf
           sudo wg-quick up wg-mimit
@@ -94,7 +97,9 @@ jobs:
           def download(url, path):
               path.unlink(missing_ok=True)
               subprocess.run([
-                  'curl', '-4', '-fLsS', '--connect-timeout', '8',
+                  'curl', '-4', '-fLsS',
+                  *(['--resolve', 'www.mimit.gov.it:443:81.126.92.6'] if 'www.mimit.gov.it' in url else []),
+                  '--connect-timeout', '8',
                   '--max-time', '35', '--retry', '0',
                   '-A', 'Mozilla/5.0', '-o', str(path), url
               ], check=True, timeout=42)
