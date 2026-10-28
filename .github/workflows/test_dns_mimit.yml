@@ -1,0 +1,92 @@
+
+name: Test DNS alternativi MIMIT
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-dns:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Confronta DNS e verifica IP
+        shell: bash
+        run: |
+          set +e
+
+          HOST="www.mimit.gov.it"
+          URL="https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
+
+          echo "=================================="
+          echo "1. DNS GITHUB ACTIONS"
+          echo "=================================="
+          getent ahostsv4 "$HOST"
+
+          echo "=================================="
+          echo "2. DNS GOOGLE - 8.8.8.8"
+          echo "=================================="
+          dig +time=3 +tries=1 \
+            @8.8.8.8 "$HOST" A +short
+
+          echo "=================================="
+          echo "3. DNS CLOUDFLARE - 1.1.1.1"
+          echo "=================================="
+          dig +time=3 +tries=1 \
+            @1.1.1.1 "$HOST" A +short
+
+          echo "=================================="
+          echo "4. DNS GOOGLE HTTPS"
+          echo "=================================="
+          curl -fsS --max-time 8 \
+            "https://dns.google/resolve?name=$HOST&type=A"
+          echo ""
+
+          echo "=================================="
+          echo "5. DNS CLOUDFLARE HTTPS"
+          echo "=================================="
+          curl -fsS --max-time 8 \
+            -H "accept: application/dns-json" \
+            "https://cloudflare-dns.com/dns-query?name=$HOST&type=A"
+          echo ""
+
+          echo "=================================="
+          echo "6. TEST IP ALTERNATIVI"
+          echo "=================================="
+
+          IPS=$(
+            {
+              getent ahostsv4 "$HOST" | awk '{print $1}'
+              dig +time=3 +tries=1 @8.8.8.8 "$HOST" A +short
+              dig +time=3 +tries=1 @1.1.1.1 "$HOST" A +short
+            } | grep -E \
+              '^([0-9]{1,3}\.){3}[0-9]{1,3}$' \
+              | sort -u
+          )
+
+          if [ -z "$IPS" ]; then
+            echo "Nessun indirizzo IPv4 trovato"
+          fi
+
+          for IP in $IPS; do
+            echo "----------------------------------"
+            echo "TEST IP: $IP"
+            echo "----------------------------------"
+
+            curl -4 -sS -I \
+              --resolve "$HOST:443:$IP" \
+              --connect-timeout 5 \
+              --max-time 8 \
+              -o /dev/null \
+              -w "HTTP: %{http_code}\nIP: %{remote_ip}\n" \
+              "$URL"
+
+            echo "Exit code: $?"
+          done
+
+          echo "=================================="
+          echo "DIAGNOSTICA DNS COMPLETATA"
+          echo "=================================="
