@@ -1,0 +1,40 @@
+name: Test connessione MIMIT
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Diagnostica connessione MIMIT
+        shell: bash
+        run: |
+          echo "=== DNS MIMIT ==="
+          getent ahosts www.mimit.gov.it || true
+
+          echo "=== TEST HTTPS IPv4 ==="
+          curl -4 -I -L \
+            --connect-timeout 10 \
+            --max-time 20 \
+            -v \
+            https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv || true
+
+          echo "=== TEST HTTPS IPv6 ==="
+          curl -6 -I -L \
+            --connect-timeout 10 \
+            --max-time 20 \
+            -v \
+            https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv || true
+
+          echo "=== TEST DOWNLOAD CSV ==="
+          curl -4 -L \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -o /tmp/prezzo_alle_8.csv \
+            -w 'HTTP: %{http_code}\nDimensione: %{size_download} byte\n' \
+            https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv || true
+
+          echo "=== FINE TEST ==="
