@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Costi Carburante v57 - riconciliazione rifornimenti</title><link rel="stylesheet" href="./costiCarburante.css?v=15"></head><body><div id="costi-carburante-root"><div class="cc-wrap">
+<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Costi Carburante v58 - prezzi MIMIT cronologici</title><link rel="stylesheet" href="./costiCarburante.css?v=15"></head><body><div id="costi-carburante-root"><div class="cc-wrap">
 <h1>Costi Carburante</h1>
 <div class="cc-card">
 <div class="cc-topline">
@@ -109,61 +109,52 @@
          return nearestStation(lat,lon);
         }
 
-async function priceFromFile(url,fuel,fillDate,source,mode){
-             let o=await fetchGzip(url);
-             let fillDay=localYmd(new Date(fillDate));
-             let rows=[];
-
-             for(const [key,arr] of Object.entries(o.prezzi||{})){
-              let p=key.split("|"),name=p[0],self=String(p[1]??"");
-              if(normalizeFuel(name)!==fuel)continue;
-              if(mode!==undefined&&mode!==null&&self!==String(mode))continue;
-
-              let exact=[],previous=[];
-              for(const r of arr||[]){
-               let dt=String(r[0]||""),day=dt.slice(0,10);
-               if(day===fillDay)exact.push(r);
-               if(day<=fillDay)previous.push(r);
-              }
-              let pool=exact.length?exact:previous;
-              pool.sort((x,y)=>String(y[0]).localeCompare(String(x[0])));
-              if(pool.length)rows.push({
-               date:String(pool[0][0]),price:Number(pool[0][1]),self,
-               source:pool[0][2]||source,exact:exact.length>0
-              });
-             }
-             rows.sort((x,y)=>String(y.date).localeCompare(String(x.date)));
-             return rows.length?rows[0]:null;
+// Prezzi storici: confrontiamo gli istanti in ora italiana, non solo il giorno.
+            // I timestamp MIMIT privi di fuso sono interpretati come Europe/Rome.
+            function italianLocalStamp(value){
+             let d=new Date(value);
+             if(!Number.isFinite(d.getTime()))return null;
+             const parts=new Intl.DateTimeFormat("en-CA",{
+              timeZone:"Europe/Rome",year:"numeric",month:"2-digit",day:"2-digit",
+              hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"
+             }).formatToParts(d);
+             let x=Object.fromEntries(parts.map(p=>[p.type,p.value]));
+             return `${x.year}-${x.month}-${x.day}T${x.hour}:${x.minute}:${x.second}`;
             }
-
-            async function priceFromDailyFallback(url,fuel,fillDate){
-             let o=await fetchGzip(url),arr=(o.giornalieri||{})[fuel]||[];
-             let fillDay=String(fillDate).slice(0,10),best=null;
-             for(const r of arr){let day=String(r[0]);if(day<=fillDay&&(!best||day>best.date))best={date:day,price:Number(r[1]),source:"MIMIT - snapshot giornaliero"}}
-             return best;
+            function mimitLocalStamp(value){
+             let s=String(value??"").trim().replace(" ","T");
+             let m=s.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::(\d{2}))?/);
+             if(m&&!/[zZ]|[+-]\d{2}:?\d{2}$/.test(s))return `${m[1]}T${m[2]}:${m[3]||"00"}`;
+             return italianLocalStamp(s);
+            }
+            async function priceFromFile(url,fuel,fillDate,source,mode){
+             let o=await fetchGzip(url),cutoff=italianLocalStamp(fillDate);
+             if(!cutoff)return null;
+             let best=null;
+             for(const [key,arr] of Object.entries(o.prezzi||{})){
+              let [name,self]=key.split("|");
+              if(normalizeFuel(name)!==fuel||String(self)!==String(mode))continue;
+              for(const r of arr||[]){
+               let stamp=mimitLocalStamp(r[0]),price=Number(r[1]);
+               if(!stamp||stamp>cutoff||!Number.isFinite(price)||price<=0)continue;
+               if(!best||stamp>best.stamp)best={date:String(r[0]),stamp,price,self:String(self),source:r[2]||source};
+              }
+             }
+             if(!best)return null;
+             let fillDay=cutoff.slice(0,10),priceDay=best.stamp.slice(0,10);
+             let ageDays=Math.round((Date.parse(fillDay+"T12:00:00Z")-Date.parse(priceDay+"T12:00:00Z"))/86400000);
+             return {...best,ageDays,stale:ageDays>2};
             }
             async function historicalPrice(stationId,fuel,fillDate){
              let bucket=String(Math.floor(stationId/1000)).padStart(3,"0");
-             let mimitUrl=`${DATA_BASE}/prezzi/${bucket}/${stationId}.json.gz`;
-
+             let url=`${DATA_BASE}/prezzi/${bucket}/${stationId}.json.gz`;
              let [selfPrice,servedPrice]=await Promise.all([
-              priceFromFile(mimitUrl,fuel,fillDate,"MIMIT","1").catch(()=>null),
-              priceFromFile(mimitUrl,fuel,fillDate,"MIMIT","0").catch(()=>null)
+              priceFromFile(url,fuel,fillDate,"MIMIT","1").catch(e=>{console.warn("Prezzo Self",e);return null}),
+              priceFromFile(url,fuel,fillDate,"MIMIT","0").catch(e=>{console.warn("Prezzo Servito",e);return null})
              ]);
-
              let primary=selfPrice||servedPrice;
-             if(primary)return {
-              ...primary,
-              official:quarterIsOfficial(fillDate),
-              selfPrice:selfPrice,
-              servedPrice:servedPrice
-             };
-
-             let fb=await priceFromDailyFallback(
-              `${DATA_BASE}/fallback_mensile/${bucket}/${stationId}.json.gz`,
-              fuel,fillDate
-             ).catch(()=>null);
-             return fb?{...fb,official:false,selfPrice:null,servedPrice:null}:null;
+             // Non sostituiamo un prezzo Self con uno snapshot senza modalita' certa.
+             return primary?{...primary,official:quarterIsOfficial(fillDate),selfPrice,servedPrice}:null;
             }
 
             function supplier(s){let r=s.raw,gestore=r[3]||"",bandiera=r[4]||"",nome=r[6]||"";return {gestore,bandiera,nome,address:[r[7],r[8],r[9]].filter(Boolean).join(" — ")}}
@@ -783,7 +774,7 @@ function render(items){
               }
 
               let chosen=selectedPriceForItem(x);
-              let price=chosen?`${dec(chosen.price,3)}<div class="cc-sub">${esc(dtLocal(chosen.date))}</div>`:`<span class="cc-warn">—</span>`;
+              let price=chosen?`${dec(chosen.price,3)}<div class="cc-sub">${esc(dtLocal(chosen.date))}</div>${chosen.stale?`<div class="cc-warn" style="font-size:11px">Ultima comunicazione: ${chosen.ageDays} giorni prima (da verificare)</div>`:""}`:`<span class="cc-warn">—</span>`;
               let cost=x.verified?money(x.cost):"—",tr=document.createElement("tr");
               let percentInfo=Number.isFinite(x.fuelPercentDelta)?`<div class="cc-sub">${dec(x.fuelPercentBefore,1)}% → ${dec(x.fuelPercentAfter,1)}% (Δ +${dec(x.fuelPercentDelta,1)}%)${x.fuelPercentConfirmed?" · confermato":""}</div>`:"";
               let diagParts=[];
