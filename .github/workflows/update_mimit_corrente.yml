@@ -86,21 +86,36 @@ jobs:
           echo "Handshake WireGuard non riuscito"
           exit 1
 
+      
       - name: Diagnostica HTTPS MIMIT
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
-          echo "=== Test HTTPS attraverso FRITZBox ==="
+          echo "=== Stato WireGuard ==="
+          sudo wg show wg-mimit
 
-          curl -4 -sS \
+          echo "=== Rotta verso MIMIT ==="
+          ip -4 route get 81.126.92.6
+
+          echo "=== IP pubblico in uscita ==="
+          curl -4 -sS --max-time 15 \
+            https://api.ipify.org || true
+          echo
+
+          echo "=== Test HTTPS MIMIT via VPN ==="
+          curl -4 -v \
             --noproxy '*' \
             --resolve www.mimit.gov.it:443:81.126.92.6 \
             --connect-timeout 15 \
             --max-time 30 \
             -o /dev/null \
             -w "HTTP: %{http_code}\n" \
-            https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv
+            https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv \
+            2>&1 | tail -35
+
+          echo "=== Diagnostica terminata ==="
+
 
       - name: Scarica e archivia prezzi verificati
         shell: bash
