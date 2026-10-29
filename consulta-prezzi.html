@@ -1,10 +1,6 @@
 <!DOCTYPE html>
-<html lang="it">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Consulta prezzi MIMIT</title>
-<style>
+<html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Consulta prezzi MIMIT aggiornati</title><style>
 *{box-sizing:border-box}
 body{margin:0;background:#f4f6f8;font-family:Arial,Helvetica,sans-serif;color:#263238;font-size:14px}
 .wrap{max-width:1180px;margin:0 auto;padding:20px}
@@ -29,195 +25,44 @@ th{background:#f6f8fa;color:#52616b;font-size:12px;text-transform:uppercase}
 .badge{display:inline-block;padding:3px 7px;border-radius:10px;background:#eef3f7;font-size:11px}
 .hidden{display:none}
 @media(max-width:800px){.grid,.grid2{grid-template-columns:1fr}.wrap{padding:12px}}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>Consulta prezzi MIMIT</h1>
-  <div class="sub">Ricerca impianto per comune e nome, quindi consulta lo storico prezzi salvato nel dataset GitHub Pages.</div>
 
-  <div class="card">
-    <div class="grid">
-      <div>
-        <label for="comune">Comune</label>
-        <input id="comune" placeholder="Es. Ferrara">
-      </div>
-      <div>
-        <label for="nome">Nome / gestore / bandiera / indirizzo</label>
-        <input id="nome" placeholder="Es. CONAD, Q8, Via Eridano...">
-      </div>
-      <button id="cerca">Cerca impianti</button>
-    </div>
-    <div id="searchStatus" class="status">Inserisci almeno il comune.</div>
-    <div id="results" class="results hidden"></div>
-  </div>
-
-  <div id="priceCard" class="card hidden">
-    <div id="selectedStation"></div>
-    <div class="grid2" style="margin-top:15px">
-      <div>
-        <label for="data">Data</label>
-        <input id="data" type="date">
-      </div>
-      <div>
-        <label for="carburante">Carburante</label>
-        <select id="carburante"><option value="">Tutti i carburanti</option></select>
-      </div>
-      <div>
-        <label for="modalita">Modalità</label>
-        <select id="modalita">
-          <option value="">Self + servito</option>
-          <option value="1">Self service</option>
-          <option value="0">Servito</option>
-        </select>
-      </div>
-      <button id="prezzo">Cerca prezzo</button>
-    </div>
-    <div id="priceStatus" class="status"></div>
-    <div id="priceResult"></div>
-  </div>
-</div>
-
-<script>
-(function(){
-"use strict";
-const DATA_BASE="https://hattorikenzo.github.io/geotab-carburanti/data";
-const GRID=.05;
-let stations=[], selected=null, priceData=null;
-
+.info{background:#eef5ff;border-left:4px solid #1565c0;padding:12px;border-radius:6px;margin-bottom:15px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.actions button{height:36px}
+.small{font-size:12px;color:#647582}.warn{color:#9b5b00}.tablewrap{overflow:auto}td{vertical-align:top}
+</style></head><body><div class="wrap">
+<h1>Consulta prezzi MIMIT aggiornati</h1>
+<div class="sub">Ricerca pubblica indipendente da MyGeotab. Legge direttamente i file pubblicati su GitHub Pages.</div>
+<div class="card"><div id="dataset" class="info">Verifica ultimo aggiornamento dataset MIMIT…</div><button id="refreshMeta">Aggiorna stato dataset</button></div>
+<div class="card"><div class="grid"><div><label for="comune">Comune</label><input id="comune" placeholder="Es. Ferrara"></div><div><label for="nome">Nome, gestore, indirizzo</label><input id="nome" placeholder="Es. Via Eridano, Q8"></div><button id="cerca">Cerca impianti</button></div>
+<div id="searchStatus" class="status">Cerca per comune oppure usa direttamente l'ID MIMIT qui sotto.</div><div id="results" class="results hidden"></div></div>
+<div class="card"><div class="grid"><div><label for="stationId">Ricerca diretta per ID MIMIT</label><input id="stationId" inputmode="numeric" placeholder="Es. 48907"></div><div><label for="directNote">Fonte</label><div id="directNote" class="small">Archivio ufficiale MIMIT pubblicato nel progetto</div></div><button id="direct">Apri ID impianto</button></div></div>
+<div id="priceCard" class="card hidden"><div id="selectedStation"></div>
+<div class="grid2" style="margin-top:15px"><div><label for="data">Prezzi validi alla data</label><input id="data" type="date"></div><div><label for="carburante">Carburante</label><select id="carburante"><option value="">Tutti i carburanti</option></select></div><div><label for="modalita">Modalità</label><select id="modalita"><option value="">Self + servito</option><option value="1">Self service</option><option value="0">Servito</option></select></div><button id="prezzo">Consulta prezzi</button></div>
+<div class="actions"><button id="latest">Mostra prezzi attuali</button><button id="reload">Ricarica archivio impianto</button></div>
+<div id="priceStatus" class="status"></div><div id="priceResult" class="tablewrap"></div>
+<p class="small">La data di estrazione del dataset indica quando è stato scaricato il CSV; la data di comunicazione (dtComu) indica quando il gestore ha comunicato il singolo prezzo. Un prezzo può essere ancora quello corrente anche se la comunicazione è precedente.</p>
+</div></div><script>
+(function(){"use strict";
+const BASE="https://hattorikenzo.github.io/geotab-carburanti/data", GRID=.05;
+let selected=null,priceData=null,meta=null,seq=0;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const norm=s=>String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();
-const dec=(n,d=3)=>new Intl.NumberFormat("it-IT",{minimumFractionDigits:d,maximumFractionDigits:d}).format(n);
-
-function today(){
- const d=new Date(), y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,"0"),g=String(d.getDate()).padStart(2,"0");
- return `${y}-${m}-${g}`;
-}
-$("data").value=today(); $("data").max=today();
-
-async function fetchJson(url){
- const r=await fetch(url,{cache:"no-store"});
- if(!r.ok) throw new Error("HTTP "+r.status);
- return r.json();
-}
-async function fetchGzip(url){
- const r=await fetch(url,{cache:"no-store"});
- if(!r.ok) throw new Error("HTTP "+r.status);
- if(!("DecompressionStream" in window)) throw new Error("Il browser non supporta la decompressione gzip.");
- const ds=new DecompressionStream("gzip");
- return JSON.parse(await new Response(r.body.pipeThrough(ds)).text());
-}
-async function geocodeComune(comune){
- const u="https://nominatim.openstreetmap.org/search?format=json&countrycodes=it&limit=1&q="+encodeURIComponent(comune+", Italia");
- const r=await fetch(u,{headers:{"Accept":"application/json"}});
- if(!r.ok) throw new Error("Geocodifica comune non disponibile");
- const a=await r.json();
- if(!a.length) throw new Error("Comune non trovato");
- return {lat:Number(a[0].lat),lon:Number(a[0].lon),display:a[0].display_name};
-}
-function stationObj(r){
- return {
-  raw:r,id:Number(r[0]),lat:Number(r[1]),lon:Number(r[2]),
-  gestore:r[3]||"",bandiera:r[4]||"",extra:r[5]||"",nome:r[6]||"",
-  indirizzo:r[7]||"",comune:r[8]||"",provincia:r[9]||""
- };
-}
-async function loadArea(lat,lon,radius=5){
- const cy=Math.floor(lat/GRID),cx=Math.floor(lon/GRID), jobs=[];
- for(let dy=-radius;dy<=radius;dy++) for(let dx=-radius;dx<=radius;dx++){
-   jobs.push(fetchJson(`${DATA_BASE}/geo/${cy+dy}_${cx+dx}.json`).catch(()=>[]));
- }
- const arrays=await Promise.all(jobs), map=new Map();
- for(const a of arrays) for(const r of a){const s=stationObj(r);if(Number.isFinite(s.id))map.set(s.id,s)}
- return [...map.values()];
-}
-function renderStations(list){
- const box=$("results"); box.innerHTML="";
- if(!list.length){box.classList.add("hidden");return}
- box.classList.remove("hidden");
- for(const s of list.slice(0,300)){
-   const d=document.createElement("div"); d.className="station";
-   d.innerHTML=`<b>${esc(s.gestore||s.bandiera||s.nome||"Impianto MIMIT")}</b> <span class="badge">ID ${s.id}</span>
-   <div class="muted">${esc([s.bandiera,s.nome].filter(Boolean).join(" — "))}</div>
-   <div class="muted">${esc([s.indirizzo,s.comune,s.provincia].filter(Boolean).join(" — "))}</div>`;
-   d.onclick=()=>selectStation(s,d); box.appendChild(d);
- }
-}
-async function search(){
- const comune=$("comune").value.trim(), q=norm($("nome").value);
- if(!comune){$("searchStatus").innerHTML='<span class="err">Inserisci il comune.</span>';return}
- $("cerca").disabled=true;$("searchStatus").textContent="Ricerca del comune e caricamento impianti...";
- $("results").classList.add("hidden");
- try{
-   const geo=await geocodeComune(comune);
-   const all=await loadArea(geo.lat,geo.lon,5);
-   const c=norm(comune);
-   let list=all.filter(s=>norm(s.comune).includes(c));
-   if(!list.length) list=all; // utile se la denominazione MIMIT differisce leggermente
-   if(q) list=list.filter(s=>norm([s.gestore,s.bandiera,s.nome,s.indirizzo,s.comune,s.provincia].join(" ")).includes(q));
-   list.sort((a,b)=>(a.gestore||a.bandiera||a.nome).localeCompare(b.gestore||b.bandiera||b.nome,"it"));
-   stations=list;
-   $("searchStatus").innerHTML=list.length?`<span class="ok">${list.length} impianti trovati.</span> Seleziona quello desiderato.`:'<span class="err">Nessun impianto trovato. Prova solo con il comune o con un termine più breve.</span>';
-   renderStations(list);
- }catch(e){$("searchStatus").innerHTML='<span class="err">'+esc(e.message)+'</span>'}
- finally{$("cerca").disabled=false}
-}
-async function selectStation(s,el){
- selected=s; priceData=null;
- document.querySelectorAll(".station").forEach(x=>x.classList.remove("sel")); el.classList.add("sel");
- $("priceCard").classList.remove("hidden");
- $("selectedStation").innerHTML=`<b style="font-size:18px;color:#123f73">${esc(s.gestore||s.bandiera||s.nome||"Impianto MIMIT")}</b>
- <span class="badge">ID MIMIT ${s.id}</span>
- <div class="muted">${esc([s.bandiera,s.nome,s.indirizzo,s.comune,s.provincia].filter(Boolean).join(" — "))}</div>`;
- $("priceStatus").textContent="Caricamento archivio prezzi dell'impianto...";
- $("priceResult").innerHTML="";
- try{
-   const bucket=String(Math.floor(s.id/1000)).padStart(3,"0");
-   priceData=await fetchGzip(`${DATA_BASE}/prezzi/${bucket}/${s.id}.json.gz`);
-   const fuels=[...new Set(Object.keys(priceData.prezzi||{}).map(k=>k.split("|")[0]))].sort((a,b)=>a.localeCompare(b,"it"));
-   $("carburante").innerHTML='<option value="">Tutti i carburanti</option>'+fuels.map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join("");
-   $("priceStatus").innerHTML=`<span class="ok">Archivio caricato: ${fuels.length} tipologie carburante.</span>`;
- }catch(e){
-   $("priceStatus").innerHTML='<span class="err">Archivio prezzi non disponibile per questo impianto.</span>';
- }
-}
-function searchPrice(){
- if(!selected||!priceData)return;
- const day=$("data").value, fuel=$("carburante").value, mode=$("modalita").value;
- if(!day){$("priceStatus").innerHTML='<span class="err">Seleziona una data.</span>';return}
- const rows=[];
- for(const [key,arr] of Object.entries(priceData.prezzi||{})){
-   const p=key.split("|"), name=p[0], self=String(p[1]??"");
-   if(fuel&&name!==fuel)continue;
-   if(mode!==""&&self!==mode)continue;
-   let exact=[],previous=[];
-   for(const r of arr||[]){
-     const dt=String(r[0]||""), d=dt.slice(0,10);
-     if(d===day)exact.push(r);
-     if(d<=day)previous.push(r);
-   }
-   const pool=exact.length?exact:previous;
-   pool.sort((a,b)=>String(b[0]).localeCompare(String(a[0])));
-   if(pool.length) rows.push({fuel:name,self,date:String(pool[0][0]),price:Number(pool[0][1]),source:pool[0][2]||"MIMIT",exact:exact.length>0});
- }
- rows.sort((a,b)=>a.fuel.localeCompare(b.fuel,"it")||b.self.localeCompare(a.self));
- if(!rows.length){
-   $("priceResult").innerHTML='<div class="status err">Nessun prezzo disponibile alla data selezionata.</div>';return;
- }
- $("priceResult").innerHTML=`<table><thead><tr><th>Carburante</th><th>Modalità</th><th>Prezzo</th><th>Comunicazione MIMIT</th><th>Risultato</th></tr></thead><tbody>${
- rows.map(r=>`<tr><td><b>${esc(r.fuel)}</b></td><td>${r.self==="1"?"Self service":r.self==="0"?"Servito":esc(r.self)}</td>
- <td class="price">${dec(r.price,3)} €/L</td><td>${esc(r.date.replace("T"," ").replace("Z",""))}</td>
- <td>${r.exact?'<span class="ok">Comunicazione del giorno</span>':'Ultimo prezzo precedente valido'}</td></tr>`).join("")
- }</tbody></table>`;
- $("priceStatus").textContent=`Prezzi disponibili al ${day}.`;
-}
-
-$("cerca").onclick=search;
-$("prezzo").onclick=searchPrice;
-$("comune").addEventListener("keydown",e=>{if(e.key==="Enter")search()});
-$("nome").addEventListener("keydown",e=>{if(e.key==="Enter")search()});
+const dec=n=>new Intl.NumberFormat("it-IT",{minimumFractionDigits:3,maximumFractionDigits:3}).format(n);
+const today=()=>{const d=new Date();return [d.getFullYear(),String(d.getMonth()+1).padStart(2,"0"),String(d.getDate()).padStart(2,"0")].join("-")};
+$("data").value=today();$("data").max=today();
+function url(path){return BASE+"/"+path+(path.includes("?")?"&":"?")+"_="+Date.now()+"_"+(++seq)}
+async function json(path){const r=await fetch(url(path),{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status+" · "+path);return r.json()}
+async function gz(path){const r=await fetch(url(path),{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status+" · "+path);if(!("DecompressionStream" in window))throw Error("Browser privo di supporto gzip");return JSON.parse(await new Response(r.body.pipeThrough(new DecompressionStream("gzip"))).text())}
+async function refreshMeta(){const el=$("dataset");el.textContent="Verifica aggiornamento…";try{meta=await json("ultimo_aggiornamento_prezzi.json");el.innerHTML=`<b>Fonte: ${esc(meta.fonte||"—")}</b> · Estrazione: <b>${esc(meta.data_estrazione||"—")}</b> · Elaborazione: ${esc(meta.aggiornato_utc||"—")}<div class="small">Impianti con prezzi: ${esc(meta.impianti_con_prezzi??"—")} · Archivi modificati: ${esc(meta.file_prezzi_modificati??"—")} · ${esc(meta.nota||"")}</div>`}catch(e){el.textContent="Impossibile leggere lo stato del dataset: "+e.message}}
+function stationObj(r){return {id:Number(r[0]),lat:Number(r[1]),lon:Number(r[2]),gestore:r[3]||"",bandiera:r[4]||"",nome:r[6]||"",indirizzo:r[7]||"",comune:r[8]||"",provincia:r[9]||""}}
+async function geocode(comune){const r=await fetch("https://nominatim.openstreetmap.org/search?format=json&countrycodes=it&limit=1&q="+encodeURIComponent(comune+", Italia"));if(!r.ok)throw Error("Servizio di ricerca comuni non disponibile");const a=await r.json();if(!a.length)throw Error("Comune non trovato");return {lat:Number(a[0].lat),lon:Number(a[0].lon)}}
+async function search(){const comune=$("comune").value.trim(),q=norm($("nome").value);if(!comune){$("searchStatus").textContent="Inserisci il comune, oppure usa la ricerca diretta per ID.";return}$("cerca").disabled=true;$("searchStatus").textContent="Ricerca impianti in corso…";$("results").classList.add("hidden");try{const p=await geocode(comune),cy=Math.floor(p.lat/GRID),cx=Math.floor(p.lon/GRID),jobs=[];for(let dy=-5;dy<=5;dy++)for(let dx=-5;dx<=5;dx++)jobs.push(json(`geo/${cy+dy}_${cx+dx}.json`).then(v=>({v,ok:true})).catch(()=>({v:[],ok:false})));const all=await Promise.all(jobs),map=new Map();let failed=0;for(const a of all){if(!a.ok)failed++;for(const r of a.v){const s=stationObj(r);if(Number.isInteger(s.id)&&s.id>0)map.set(s.id,s)}}if(failed===jobs.length)throw Error("Nessuna cella geografica caricata");let list=[...map.values()].filter(s=>norm(s.comune)===norm(comune));if(q)list=list.filter(s=>norm([s.gestore,s.bandiera,s.nome,s.indirizzo,s.comune,s.provincia].join(" ")).includes(q));list.sort((a,b)=>(a.gestore||a.bandiera||a.nome).localeCompare(b.gestore||b.bandiera||b.nome,"it"));$("searchStatus").textContent=`${list.length} impianti nel comune di ${comune}. ${failed?"Attenzione: "+failed+" celle non disponibili; risultati potenzialmente incompleti.":""}${list.length>300?" Visualizzati i primi 300; affina la ricerca.":""}`;const box=$("results");box.innerHTML="";for(const s of list.slice(0,300)){const d=document.createElement("div");d.className="station";d.innerHTML=`<b>${esc(s.gestore||s.bandiera||s.nome||"Impianto")}</b> <span class="badge">ID ${s.id}</span><div class="muted">${esc([s.indirizzo,s.comune,s.provincia].filter(Boolean).join(" — "))}</div>`;d.onclick=()=>openStation(s,d);box.appendChild(d)}box.classList.toggle("hidden",!list.length)}catch(e){$("searchStatus").textContent="Errore: "+e.message}finally{$("cerca").disabled=false}}
+function pathFor(id){return `prezzi/${String(Math.floor(id/1000)).padStart(3,"0")}/${id}.json.gz`}
+async function openStation(s,el){selected=s;priceData=null;document.querySelectorAll(".station").forEach(x=>x.classList.remove("sel"));if(el)el.classList.add("sel");$("stationId").value=s.id;$("priceCard").classList.remove("hidden");$("selectedStation").innerHTML=`<b style="font-size:18px;color:#123f73">${esc(s.gestore||s.bandiera||s.nome||"Impianto MIMIT")}</b> <span class="badge">ID ${s.id}</span><div class="muted">${esc([s.indirizzo,s.comune,s.provincia].filter(Boolean).join(" — "))}</div>`;await reload()}
+async function reload(){if(!selected)return;const id=selected.id;$("priceStatus").textContent="Download aggiornato dell'archivio impianto…";$("priceResult").innerHTML="";try{const obj=await gz(pathFor(id));if(!selected||selected.id!==id)return;priceData=obj;const keys=[...Object.keys(obj.corrente||{}),...Object.keys(obj.prezzi||{})];const fuels=[...new Set(keys.map(k=>k.split("|")[0]))].sort((a,b)=>a.localeCompare(b,"it"));$("carburante").innerHTML='<option value="">Tutti i carburanti</option>'+fuels.map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join("");$("priceStatus").textContent=`Archivio caricato: ${fuels.length} carburanti. Ultima estrazione generale MIMIT: ${meta?.data_estrazione||"non disponibile"}.`;searchPrice()}catch(e){priceData=null;$("priceStatus").textContent="Archivio non disponibile: "+e.message}}
+function records(){const out=[];for(const [key,r] of Object.entries(priceData?.corrente||{})){if(Array.isArray(r))out.push({key,r,origin:"corrente"})}for(const [key,arr] of Object.entries(priceData?.prezzi||{}))for(const r of arr||[])if(Array.isArray(r))out.push({key,r,origin:"storico"});return out}
+function searchPrice(){if(!priceData)return;const day=$("data").value,fuel=$("carburante").value,mode=$("modalita").value;if(!day){$("priceStatus").textContent="Seleziona una data";return}const best=new Map();for(const {key,r,origin} of records()){const [name,self]=key.split("|");if(fuel&&name!==fuel)continue;if(mode!==""&&self!==mode)continue;const date=String(r[0]||""),price=Number(r[1]);if(!date||date.slice(0,10)>day||!Number.isFinite(price)||price<=0)continue;const prev=best.get(key);if(!prev||date>prev.date||(date===prev.date&&origin==="corrente"&&prev.origin!=="corrente"))best.set(key,{name,self,date,price,origin,source:origin==="corrente"?"MIMIT corrente":String(r[2]||"MIMIT storico")})}const rows=[...best.values()].sort((a,b)=>a.name.localeCompare(b.name,"it")||b.self.localeCompare(a.self));if(!rows.length){$("priceResult").innerHTML='<div class="status warn">Nessun prezzo comunicato entro la data selezionata.</div>';return}$("priceResult").innerHTML=`<table><thead><tr><th>Carburante</th><th>Modalità</th><th>Prezzo €/L</th><th>Ultima comunicazione</th><th>Fonte / validità</th></tr></thead><tbody>${rows.map(r=>`<tr><td><b>${esc(r.name)}</b></td><td>${r.self==="1"?"Self":r.self==="0"?"Servito":esc(r.self)}</td><td class="price">€ ${dec(r.price)}</td><td>${esc(r.date.replace("T"," "))}</td><td>${esc(r.source)}<div class="small">${r.date.slice(0,10)===day?"Comunicazione del giorno":"Ultima comunicazione precedente"}</div></td></tr>`).join("")}</tbody></table>`;$("priceStatus").textContent=`${rows.length} prezzi validi al ${day}. Estrazione dataset: ${meta?.data_estrazione||"non disponibile"}.`}
+$("cerca").onclick=search;$("direct").onclick=()=>{const id=Number($("stationId").value);if(!Number.isSafeInteger(id)||id<=0){alert("Inserisci un ID MIMIT numerico valido");return}openStation({id,gestore:"Impianto MIMIT "+id},null)};$("prezzo").onclick=searchPrice;$("latest").onclick=()=>{$("data").value=today();searchPrice()};$("reload").onclick=reload;$("refreshMeta").onclick=refreshMeta;for(const id of ["comune","nome","stationId"])$(id).addEventListener("keydown",e=>{if(e.key==="Enter")(id==="stationId"?$("direct"):$("cerca")).click()});refreshMeta();
 })();
-</script>
-</body>
-</html>
+</script></body></html>
