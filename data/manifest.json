@@ -22,11 +22,11 @@
   "ultimo_aggiornamento_prezzi": "2026-09-25T08:02:53",
   "impianti_attivi": 23776,
   "celle_geo": 6480,
-  "aggiornato_il": "2026-10-29T21:38:35.098029+00:00",
+  "aggiornato_il": "2026-10-30T14:18:17.700673+00:00",
   "ultimo_dt_comu": "2026-10-15T08:01:42",
   "raccolta_giornaliera_attiva": true,
-  "ultimo_aggiornamento_prezzi_correnti": "2026-10-29T21:38:35.098029+00:00",
-  "ultima_estrazione_mimit": "2026-10-28",
+  "ultimo_aggiornamento_prezzi_correnti": "2026-10-30T14:18:17.700673+00:00",
+  "ultima_estrazione_mimit": "2026-10-29",
   "fonte_prezzi_correnti": "MIMIT",
-  "impianti_con_prezzi_correnti": 21641
+  "impianti_con_prezzi_correnti": 21645
 }
