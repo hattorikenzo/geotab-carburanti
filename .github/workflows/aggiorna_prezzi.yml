@@ -74,23 +74,54 @@ jobs:
           sudo rm -f /etc/wireguard/wg-mimit.conf
           rm -f "$RUNNER_TEMP/wg-mimit.conf"
 
+      
       - name: Pubblica aggiornamenti su gh-pages
         id: publish
         working-directory: published
         shell: bash
         run: |
           set -euo pipefail
+
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data/prezzi data/ultimo_aggiornamento_prezzi.json data/manifest.json mimit_snapshots
+
+          git add data/prezzi \
+                  data/ultimo_aggiornamento_prezzi.json \
+                  data/manifest.json \
+                  mimit_snapshots
+
           if git diff --cached --quiet; then
             echo 'Nessuna modifica nei dati'
             echo 'changed=false' >> "$GITHUB_OUTPUT"
-          else
-            git commit -m 'Aggiorna dati MIMIT ufficiali via WireGuard'
-            git push origin HEAD:gh-pages
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          git commit -m 'Aggiorna dati MIMIT ufficiali via WireGuard'
+
+          for attempt in 1 2 3 4 5; do
+            echo "Tentativo pubblicazione $attempt/5"
+
+            git fetch origin gh-pages
+
+            if ! git rebase origin/gh-pages; then
+              echo 'Conflitto durante il rebase: pubblicazione interrotta'
+              git rebase --abort || true
+              exit 1
+            fi
+
+            if git push origin HEAD:gh-pages; then
+              echo 'Pubblicazione completata'
+              echo 'changed=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo 'Il ramo remoto è cambiato. Nuovo tentativo...'
+            sleep 10
+          done
+
+          echo 'ERRORE: pubblicazione fallita dopo 5 tentativi'
+          exit 1
+
 
       - name: Ricostruisci GitHub Pages con i dati nuovi
         if: steps.publish.outputs.changed == 'true'
