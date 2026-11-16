@@ -11,7 +11,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: mimit-dataset-unificato
+  group: mimit-gh-pages-snapshots
   cancel-in-progress: false
 
 jobs:
@@ -100,13 +100,40 @@ jobs:
 
           for attempt in 1 2 3 4 5; do
             echo "Tentativo pubblicazione $attempt/5"
-
             git fetch origin gh-pages
 
             if ! git rebase origin/gh-pages; then
-              echo 'Conflitto durante il rebase: pubblicazione interrotta'
-              git rebase --abort || true
-              exit 1
+              conflicts="$(git diff --name-only --diff-filter=U)"
+              if [ "$conflicts" != "mimit_snapshots/last_update.json" ]; then
+                echo "Conflitti non gestibili: $conflicts"
+                git rebase --abort || true
+                exit 1
+              fi
+
+              # Conserva il metadata della data di estrazione piu recente.
+              # Nessun altro file viene risolto automaticamente.
+              python3 - <<'PY'
+              import json
+              import subprocess
+              from pathlib import Path
+              p = Path('mimit_snapshots/last_update.json')
+              def version(stage):
+                  raw = subprocess.check_output(['git', 'show', f':{stage}:{p.as_posix()}'])
+                  return json.loads(raw)
+              remote = version(2)  # ours durante rebase: origin/gh-pages
+              current = version(3) # theirs durante rebase: commit del job
+              winner = current if current.get('ultima_estrazione', '') >= remote.get('ultima_estrazione', '') else remote
+              target = Path(winner.get('file', ''))
+              if not target.is_file() or not target.is_relative_to(Path('mimit_snapshots')):
+                  raise SystemExit(f'Snapshot selezionato assente o non valido: {target}')
+              p.write_text(json.dumps(winner, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+              print('Metadata snapshot selezionato:', winner.get('ultima_estrazione'))
+              PY
+              git add mimit_snapshots/last_update.json
+              GIT_EDITOR=true git -c core.editor=true rebase --continue || {
+                git rebase --abort || true
+                exit 1
+              }
             fi
 
             if git push origin HEAD:gh-pages; then
@@ -114,14 +141,12 @@ jobs:
               echo 'changed=true' >> "$GITHUB_OUTPUT"
               exit 0
             fi
-
             echo 'Il ramo remoto è cambiato. Nuovo tentativo...'
             sleep 10
           done
 
           echo 'ERRORE: pubblicazione fallita dopo 5 tentativi'
           exit 1
-
 
       - name: Ricostruisci GitHub Pages con i dati nuovi
         if: steps.publish.outputs.changed == 'true'
