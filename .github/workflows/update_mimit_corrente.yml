@@ -474,22 +474,22 @@ jobs:
               fi
 
               # Preferisci l'estrazione piu recente; verifica lo snapshot.
-              python3 - <<'PY'
-              import json
-              import subprocess
-              from pathlib import Path
-              p = Path('mimit_snapshots/last_update.json')
-              def version(stage):
-                  return json.loads(subprocess.check_output(['git', 'show', f':{stage}:{p.as_posix()}']))
-              remote = version(2)
-              current = version(3)
-              winner = current if current.get('ultima_estrazione', '') >= remote.get('ultima_estrazione', '') else remote
-              target = Path(winner.get('file', ''))
-              if not target.is_file() or not target.is_relative_to(Path('mimit_snapshots')):
-                  raise SystemExit(f'Snapshot selezionato assente o non valido: {target}')
-              p.write_text(json.dumps(winner, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-              print('Metadata snapshot selezionato:', winner.get('ultima_estrazione'))
-              PY
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          p = Path('mimit_snapshots/last_update.json')
+          def version(stage):
+              return json.loads(subprocess.check_output(['git', 'show', f':{stage}:{p.as_posix()}']))
+          remote = version(2)
+          current = version(3)
+          winner = current if current.get('ultima_estrazione', '') >= remote.get('ultima_estrazione', '') else remote
+          target = Path(winner.get('file', ''))
+          if not target.is_file() or not target.is_relative_to(Path('mimit_snapshots')):
+              raise SystemExit(f'Snapshot selezionato assente o non valido: {target}')
+          p.write_text(json.dumps(winner, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          print('Metadata snapshot selezionato:', winner.get('ultima_estrazione'))
+          PY
               git add mimit_snapshots/last_update.json
               GIT_EDITOR=true git -c core.editor=true rebase --continue || {
                 git rebase --abort || true
