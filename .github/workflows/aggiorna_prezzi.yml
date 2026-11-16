@@ -112,23 +112,23 @@ jobs:
 
               # Conserva il metadata della data di estrazione piu recente.
               # Nessun altro file viene risolto automaticamente.
-              python3 - <<'PY'
-              import json
-              import subprocess
-              from pathlib import Path
-              p = Path('mimit_snapshots/last_update.json')
-              def version(stage):
-                  raw = subprocess.check_output(['git', 'show', f':{stage}:{p.as_posix()}'])
-                  return json.loads(raw)
-              remote = version(2)  # ours durante rebase: origin/gh-pages
-              current = version(3) # theirs durante rebase: commit del job
-              winner = current if current.get('ultima_estrazione', '') >= remote.get('ultima_estrazione', '') else remote
-              target = Path(winner.get('file', ''))
-              if not target.is_file() or not target.is_relative_to(Path('mimit_snapshots')):
-                  raise SystemExit(f'Snapshot selezionato assente o non valido: {target}')
-              p.write_text(json.dumps(winner, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-              print('Metadata snapshot selezionato:', winner.get('ultima_estrazione'))
-              PY
+          python3 - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          p = Path('mimit_snapshots/last_update.json')
+          def version(stage):
+              raw = subprocess.check_output(['git', 'show', f':{stage}:{p.as_posix()}'])
+              return json.loads(raw)
+          remote = version(2)  # ours durante rebase: origin/gh-pages
+          current = version(3) # theirs durante rebase: commit del job
+          winner = current if current.get('ultima_estrazione', '') >= remote.get('ultima_estrazione', '') else remote
+          target = Path(winner.get('file', ''))
+          if not target.is_file() or not target.is_relative_to(Path('mimit_snapshots')):
+              raise SystemExit(f'Snapshot selezionato assente o non valido: {target}')
+          p.write_text(json.dumps(winner, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          print('Metadata snapshot selezionato:', winner.get('ultima_estrazione'))
+          PY
               git add mimit_snapshots/last_update.json
               GIT_EDITOR=true git -c core.editor=true rebase --continue || {
                 git rebase --abort || true
