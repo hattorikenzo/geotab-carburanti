@@ -1,10 +1,10 @@
 {
   "fonte": "MIMIT",
-  "data_estrazione": "2026-11-26",
+  "data_estrazione": "2026-11-27",
   "verifica_data_estrazione": "preambolo CSV",
-  "aggiornato_utc": "2026-11-27T17:35:11.239539+00:00",
-  "impianti_con_prezzi": 21691,
-  "file_prezzi_modificati": 11896,
+  "aggiornato_utc": "2026-11-28T16:17:37.608208+00:00",
+  "impianti_con_prezzi": 21703,
+  "file_prezzi_modificati": 11155,
   "righe_prezzo_scartate": 0,
   "nota": "Griglia geografica preservata. La data di aggiornamento non sostituisce dtComu."
 }
